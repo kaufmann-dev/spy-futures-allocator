@@ -53,6 +53,7 @@ async def test_protected_page_stops_at_app_owned_login(tmp_path: Path) -> None:
     assert "Continue with Pocket ID" in login.text
     assert "password" not in login.text.casefold()
     assert 'action="/auth/oidc/start"' in login.text
+    assert "form-action 'self' https://id.example.test" in login.headers["content-security-policy"]
 
 
 async def test_passive_api_requires_session(tmp_path: Path) -> None:

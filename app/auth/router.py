@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -12,15 +12,13 @@ from .models import AuthSession
 from .security import sanitize_return_to
 from .service import AuthError, AuthService, InvalidAuthRequest, Unauthenticated
 
-LOGIN_CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
-    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
-)
 
-
-def _no_store(response: Response) -> Response:
+def _no_store(response: Response, *, oidc_origin: str) -> Response:
     response.headers["Cache-Control"] = "no-store"
-    response.headers["Content-Security-Policy"] = LOGIN_CSP
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+        f"form-action 'self' {oidc_origin}; base-uri 'none'; frame-ancestors 'none'"
+    )
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -128,6 +126,11 @@ class AuthGuard:
 
 def build_auth_router(service: AuthService) -> APIRouter:
     router = APIRouter()
+    issuer = urlsplit(service.settings.issuer_url)
+    oidc_origin = f"{issuer.scheme}://{issuer.netloc}"
+
+    def no_store(response: Response) -> Response:
+        return _no_store(response, oidc_origin=oidc_origin)
 
     @router.get("/login", response_class=HTMLResponse)
     async def login(request: Request, return_to: str | None = None) -> Response:
@@ -140,7 +143,7 @@ def build_auth_router(service: AuthService) -> APIRouter:
                 logged_out=request.query_params.get("logged_out") == "1",
             )
         )
-        return _no_store(response)
+        return no_store(response)
 
     @router.post("/auth/oidc/start")
     async def oidc_start(request: Request) -> Response:
@@ -148,8 +151,8 @@ def build_auth_router(service: AuthService) -> APIRouter:
             form = await _urlencoded_form(request)
             redirect_url = await service.begin_login(_one(form, "return_to"))
         except AuthError as exc:
-            return _no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
-        return _no_store(RedirectResponse(redirect_url, status_code=303))
+            return no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
+        return no_store(RedirectResponse(redirect_url, status_code=303))
 
     async def complete_login(request: Request, values: dict[str, list[str]]) -> Response:
         try:
@@ -159,7 +162,7 @@ def build_auth_router(service: AuthService) -> APIRouter:
                 code=_one(values, "code"), state=_one(values, "state")
             )
         except AuthError as exc:
-            return _no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
+            return no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
         response = RedirectResponse(result.return_to, status_code=303)
         response.set_cookie(
             service.settings.cookie_name,
@@ -170,7 +173,7 @@ def build_auth_router(service: AuthService) -> APIRouter:
             samesite="lax",
             path="/",
         )
-        return _no_store(response)
+        return no_store(response)
 
     @router.get("/auth/oidc/callback")
     async def oidc_callback_get(request: Request) -> Response:
@@ -181,7 +184,7 @@ def build_auth_router(service: AuthService) -> APIRouter:
         try:
             form = await _urlencoded_form(request)
         except AuthError as exc:
-            return _no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
+            return no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
         return await complete_login(request, form)
 
     @router.post("/auth/logout")
@@ -193,7 +196,7 @@ def build_auth_router(service: AuthService) -> APIRouter:
         except Unauthenticated:
             response = RedirectResponse("/login?logged_out=1", status_code=303)
         except AuthError as exc:
-            response = _no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=502))
+            response = no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=502))
         response.delete_cookie(
             service.settings.cookie_name,
             path="/",
@@ -201,14 +204,14 @@ def build_auth_router(service: AuthService) -> APIRouter:
             httponly=True,
             samesite="lax",
         )
-        return _no_store(response)
+        return no_store(response)
 
     @router.get("/auth/oidc/logout/callback")
     async def logout_callback(request: Request) -> Response:
         try:
             service.finish_logout(_one(_query_values(request), "state"))
         except AuthError as exc:
-            return _no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
-        return _no_store(RedirectResponse("/login?logged_out=1", status_code=303))
+            return no_store(HTMLResponse(_login_page("/", error=str(exc)), status_code=400))
+        return no_store(RedirectResponse("/login?logged_out=1", status_code=303))
 
     return router
