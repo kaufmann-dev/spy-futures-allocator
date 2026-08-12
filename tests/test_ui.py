@@ -16,6 +16,7 @@ from app.db import (
     Repository,
     ScheduledTargetRecord,
     SignalSnapshotRecord,
+    SpyBarRecord,
     build_dashboard_view,
 )
 from app.domain.schedule import XnysCalendar
@@ -111,7 +112,7 @@ def _signal_history(
 ) -> None:
     for offset, session_date in enumerate(_sessions_ending_at(NOW.date(), count)):
         close = start_close + daily_change * offset
-        sma200 = close - Decimal(20) if close > Decimal(20) else close
+        previous_close = start_close + daily_change * max(0, offset - 1)
         raw_target = (
             Decimal(2)
             if session_date.weekday() == 0
@@ -119,24 +120,54 @@ def _signal_history(
             if session_date.weekday() == 3
             else Decimal("3.5")
         )
-        repository.append_signal_snapshot(
-            SignalSnapshotRecord(
-                session_date=session_date,
-                spy_close=close,
-                sma200=sma200,
-                distance_above_sma200=close / sma200 - Decimal(1),
-                daily_return=Decimal("0.001"),
-                rv20=Decimal("0.12"),
-                prior_20_session_high=close + Decimal(2),
-                dd20=Decimal("-0.005"),
-                base=Decimal(4),
-                bonus=Decimal("0.6"),
-                volatility_cap=Decimal("8.3333"),
-                raw_target=raw_target,
-                shadow_raw_target=raw_target,
-                calculated_at=CALENDAR.session_close(session_date) + timedelta(minutes=1),
-            )
+        _signal_session(
+            repository,
+            session_date=session_date,
+            open_price=previous_close,
+            close=close,
+            raw_target=raw_target,
         )
+
+
+def _signal_session(
+    repository: Repository,
+    *,
+    session_date: date,
+    open_price: Decimal,
+    close: Decimal,
+    raw_target: Decimal,
+) -> None:
+    sma200 = close - Decimal(20) if close > Decimal(20) else close
+    repository.append_signal_snapshot(
+        SignalSnapshotRecord(
+            session_date=session_date,
+            spy_close=close,
+            sma200=sma200,
+            distance_above_sma200=close / sma200 - Decimal(1),
+            daily_return=Decimal("0.001"),
+            rv20=Decimal("0.12"),
+            prior_20_session_high=close + Decimal(2),
+            dd20=Decimal("-0.005"),
+            base=Decimal(4),
+            bonus=Decimal("0.6"),
+            volatility_cap=Decimal("8.3333"),
+            raw_target=raw_target,
+            shadow_raw_target=raw_target,
+            calculated_at=CALENDAR.session_close(session_date) + timedelta(minutes=1),
+        )
+    )
+    repository.append_spy_bar(
+        SpyBarRecord(
+            session_date=session_date,
+            open=open_price,
+            high=max(open_price, close),
+            low=min(open_price, close),
+            close=close,
+            volume=Decimal("1000000"),
+            completed_at=CALENDAR.session_close(session_date),
+            fetched_at=CALENDAR.session_close(session_date) + timedelta(minutes=2),
+        )
+    )
 
 
 def test_dashboard_has_exactly_eight_status_cells_and_live_result(tmp_path: Path) -> None:
@@ -285,6 +316,14 @@ def test_strategy_chart_aligns_price_risk_and_leverage_series(tmp_path: Path) ->
     assert " H " in chart.leverage_effective_target_path
     assert " V " in chart.leverage_effective_target_path
     assert " L " not in chart.leverage_effective_target_path
+    assert chart.performance_available
+    assert len(chart.performance_strategy_points.split()) == 252
+    assert len(chart.performance_spy_points.split()) == 252
+    assert len(chart.drawdown_strategy_points.split()) == 252
+    assert len(chart.drawdown_spy_points.split()) == 252
+    assert chart.exposure_open_path.startswith("M ")
+    assert chart.latest_strategy_value != "—"
+    assert chart.latest_spy_value != "—"
     assert view.as_dict()["strategy_chart"]["session_count"] == 252
 
 
@@ -303,7 +342,7 @@ def test_strategy_chart_handles_flat_series_without_invalid_coordinates(tmp_path
     repository = _repository(tmp_path)
     _signal_history(
         repository,
-        count=2,
+        count=3,
         start_close=Decimal(420),
         daily_change=Decimal(0),
     )
@@ -381,6 +420,135 @@ def test_strategy_chart_restores_leverage_only_at_persisted_recovery_release(
     assert chart.event_lock_reference_visible
 
 
+def test_exposure_chart_fails_closed_when_a_strategy_session_is_missing(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    _signal_history(repository)
+    missing_session = _sessions_ending_at(NOW.date(), 120)[40]
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "DELETE FROM signal_snapshots WHERE session_date = ?",
+            (missing_session.isoformat(),),
+        )
+
+    chart = build_dashboard_view(repository, now=NOW).strategy_chart
+
+    assert chart.available
+    assert not chart.performance_available
+    assert chart.exposure_open_path == ""
+    assert chart.exposure_invested_percent == "—"
+    assert chart.latest_open_exposure == "—"
+    assert chart.exposure_empty_message == (
+        "Historical exposure unavailable: completed strategy sessions contain a gap."
+    )
+
+
+def test_strategy_chart_fails_closed_for_a_lock_without_a_market_session(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    _signal_history(repository)
+    repository.append_event_state(
+        EventStateRecord(
+            state="EVENT_LOCKED",
+            event_cap=Decimal(0),
+            occurred_at=NOW,
+        )
+    )
+
+    chart = build_dashboard_view(repository, now=NOW).strategy_chart
+
+    assert not chart.available
+    assert chart.empty_message == (
+        "Historical strategy replay unavailable: EVENT_LOCKED has no valid evaluated "
+        "market session."
+    )
+
+
+def test_rule_replay_includes_lock_close_and_splits_recovery_open_timing(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    sessions = [
+        date(2026, 8, 3),
+        date(2026, 8, 4),
+        date(2026, 8, 5),
+        date(2026, 8, 6),
+        date(2026, 8, 7),
+        date(2026, 8, 10),
+        date(2026, 8, 11),
+    ]
+    opens = [
+        Decimal(100),
+        Decimal(100),
+        Decimal(100),
+        Decimal(100),
+        Decimal(81),
+        Decimal(81),
+        Decimal(81),
+    ]
+    closes = [
+        Decimal(100),
+        Decimal(100),
+        Decimal(100),
+        Decimal(90),
+        Decimal(81),
+        Decimal(81),
+        Decimal("89.1"),
+    ]
+    raw_targets = [
+        Decimal(1),
+        Decimal(1),
+        Decimal(1),
+        Decimal(1),
+        Decimal(1),
+        Decimal(2),
+        Decimal(2),
+    ]
+    for session_date, open_price, close, raw_target in zip(
+        sessions, opens, closes, raw_targets, strict=True
+    ):
+        _signal_session(
+            repository,
+            session_date=session_date,
+            open_price=open_price,
+            close=close,
+            raw_target=raw_target,
+        )
+    repository.append_event_state(
+        EventStateRecord(
+            state="EVENT_LOCKED",
+            event_cap=Decimal(0),
+            occurred_at=NOW - timedelta(minutes=1),
+            lock_session=date(2026, 8, 6),
+            last_evaluated_session=date(2026, 8, 6),
+        )
+    )
+    repository.append_event_state(
+        EventStateRecord(
+            state="NO_EVENT",
+            event_cap=Decimal("4.85"),
+            occurred_at=NOW,
+            lock_session=date(2026, 8, 6),
+            last_evaluated_session=date(2026, 8, 6),
+            release_at=CALENDAR.session_open(date(2026, 8, 11)),
+        )
+    )
+
+    chart = build_dashboard_view(repository, now=NOW).strategy_chart
+
+    assert chart.performance_available
+    assert chart.latest_strategy_value == "$108.00"
+    assert chart.latest_spy_value == "$89.10"
+    assert chart.exposure_zero_sessions == 2
+    assert chart.latest_open_exposure == "2.00×"
+    assert chart.exposure_open_path == (
+        "M 0.00,79.38 H 200.00 V 79.38 H 400.00 V 79.38 "
+        "H 600.00 V 100.00 H 800.00 V 100.00 H 1000.00 V 58.76"
+    )
+
+
 def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _quote(repository, at=NOW)
@@ -405,7 +573,7 @@ def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: 
         loader=FileSystemLoader(templates),
         autoescape=select_autoescape(["html"]),
     )
-    html = environment.get_template("dashboard.html").render(view=view)
+    html = environment.get_template("dashboard.html").render(view=view, chart_view="performance")
 
     assert "HOLD NOW: 10 MES" in html
     assert 'href="/static/app.css"' in html
@@ -413,24 +581,46 @@ def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: 
     assert "NOTIONAL SIZING ONLY — MARGIN NOT CHECKED" in html
     assert "It cannot place, modify, approve, or cancel orders." in html
     assert html.count('class="status-cell"') == 8
-    assert "Strategy chart" in html
+    assert "Historical strategy replay" in html
     assert "252 completed sessions" in html
-    assert html.count('class="chart-band"') == 3
-    assert html.count("<svg") == 3
-    assert html.count("<polyline") == 5
-    assert html.count('role="img"') == 3
-    assert 'aria-labelledby="strategy-trend-title strategy-trend-description"' in html
-    assert 'aria-labelledby="strategy-risk-title strategy-risk-description"' in html
-    assert 'aria-labelledby="strategy-leverage-title strategy-leverage-description"' in html
-    assert "SPY close · solid" in html
-    assert "SMA200 · dashed" in html
-    assert "RV20 · solid" in html
-    assert "DD20 · dashed" in html
-    assert "Raw target · dashed" in html
-    assert "Effective final · stepped" in html
-    assert "RV20 volatility floor/full bonus: 8%" in html
-    assert "RV20 zero bonus: 20%" in html
-    assert "DD20 bonus gate: −1%" in html
-    assert "Qualified-event lock gate: −4%" not in html
-    assert "SPY is 3.93% above its SMA200." in html
+    assert html.count('class="chart-band"') == 1
+    assert html.count("<svg") == 1
+    assert html.count("<polyline") == 2
+    assert html.count('role="img"') == 1
+    assert 'aria-labelledby="strategy-performance-title strategy-performance-description"' in html
+    assert "ARL-5 proxy · solid" in html
+    assert "SPY price · dashed" in html
+    assert "not MES execution performance or a tradable backtest" in html
+    assert "futures basis and rolls" in html
+    assert "Drawdowns are completed-close only" in html
+    assert html.count('name="chart_view"') == 5
+    assert html.count('aria-current="true"') == 1
+    assert "<script" not in html
+    assert "onchange=" not in html
     assert 'class="chart-line chart-line-effective"' in html
+
+
+def test_dashboard_renders_exactly_one_accessible_chart_for_each_view(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _signal_history(repository)
+    view = build_dashboard_view(repository, now=NOW)
+    templates = Path(__file__).parents[1] / "app" / "templates"
+    environment = Environment(
+        loader=FileSystemLoader(templates),
+        autoescape=select_autoescape(["html"]),
+    )
+    expected_titles = {
+        "performance": "Historical ARL-5 rule replay compared with SPY",
+        "drawdowns": "Historical ARL-5 and SPY drawdowns",
+        "exposure": "Historical regular-session target exposure",
+        "trend": "SPY close and 200-session moving average",
+        "risk": "RV20 volatility and DD20 drawdown",
+    }
+
+    for chart_view, title in expected_titles.items():
+        html = environment.get_template("dashboard.html").render(view=view, chart_view=chart_view)
+
+        assert html.count("<svg") == 1
+        assert html.count('role="img"') == 1
+        assert title in html
+        assert html.count('aria-current="true"') == 1

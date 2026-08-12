@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from app.domain.calculation import MAX_TARGET
+from app.domain.performance import (
+    ExposureSchedulePoint,
+    PerformanceSeries,
+    PerformanceUnavailable,
+    SpyOhlcBar,
+    calculate_performance,
+)
 from app.domain.schedule import XnysCalendar, signal_window_for
 
-from .models import EventStateRecord, RecommendationRecord, SignalSnapshotRecord
+from .models import EventStateRecord, RecommendationRecord, SignalSnapshotRecord, SpyBarRecord
 from .repository import Repository
 
 VIENNA = ZoneInfo("Europe/Vienna")
@@ -86,9 +93,33 @@ class MetricRow(SerializableView):
 @dataclass(frozen=True, slots=True)
 class StrategyChartView(SerializableView):
     available: bool
+    performance_available: bool
+    performance_empty_message: str | None
     session_count: int
     start_date: str
     end_date: str
+    performance_strategy_points: str
+    performance_spy_points: str
+    performance_high_label: str
+    performance_midpoint_label: str
+    performance_low_label: str
+    latest_strategy_value: str
+    latest_spy_value: str
+    strategy_total_return: str
+    spy_total_return: str
+    drawdown_strategy_points: str
+    drawdown_spy_points: str
+    drawdown_high_label: str
+    drawdown_midpoint_label: str
+    drawdown_low_label: str
+    strategy_max_drawdown: str
+    spy_max_drawdown: str
+    strategy_floor_reached: bool
+    exposure_open_path: str
+    exposure_empty_message: str | None
+    exposure_invested_percent: str
+    exposure_zero_sessions: int
+    latest_open_exposure: str
     price_close_points: str
     price_sma200_points: str
     price_high_label: str
@@ -249,18 +280,13 @@ def _polyline_points(
 
 
 def _step_path(
-    values: list[Decimal | None], *, x_values: list[Decimal], low: Decimal, high: Decimal
+    values: list[Decimal], *, x_values: list[Decimal], low: Decimal, high: Decimal
 ) -> str:
     commands: list[str] = []
-    active = False
     for x, value in zip(x_values, values, strict=True):
-        if value is None:
-            active = False
-            continue
         y = _plot_coordinate(value, low=low, high=high)
-        if not active:
+        if not commands:
             commands.append(f"M {x:.2f},{y:.2f}")
-            active = True
             continue
         commands.append(f"H {x:.2f} V {y:.2f}")
     return " ".join(commands)
@@ -275,7 +301,9 @@ def _logical_event_cap_changes(
         if transition.state in zero_states:
             session_date = transition.lock_session or transition.last_evaluated_session
             if session_date is None or not calendar.is_session(session_date):
-                continue
+                raise PerformanceUnavailable(
+                    f"{transition.state} has no valid evaluated market session"
+                )
             effective_at = calendar.session_close(session_date)
             cap = Decimal(0)
         elif transition.state == "NO_EVENT" and transition.release_at is not None:
@@ -290,47 +318,133 @@ def _logical_event_cap_changes(
     return sorted(changes, key=lambda item: (item[0], item[2]))
 
 
+def _sessions_are_contiguous(dates: list[date], calendar: XnysCalendar) -> bool:
+    for previous, current in zip(dates, dates[1:], strict=False):
+        candidate = previous + timedelta(days=1)
+        while candidate < current:
+            if calendar.is_session(candidate):
+                return False
+            candidate += timedelta(days=1)
+    return True
+
+
+def _performance_series(
+    visible: list[tuple[SignalSnapshotRecord, Decimal, Decimal, Decimal]],
+    bars: list[SpyBarRecord],
+    *,
+    calendar: XnysCalendar,
+) -> PerformanceSeries:
+    bar_by_session = {item.session_date: item for item in bars}
+    dates = [item[0].session_date for item in visible]
+    if not _sessions_are_contiguous(dates, calendar):
+        raise PerformanceUnavailable("completed strategy sessions contain a gap")
+    try:
+        selected_bars = [bar_by_session[session_date] for session_date in dates]
+    except KeyError as exc:
+        raise PerformanceUnavailable(
+            f"completed SPY OHLC is missing for {exc.args[0].isoformat()}"
+        ) from exc
+    for (snapshot, _, _, _), bar in zip(visible, selected_bars, strict=True):
+        if snapshot.spy_close != bar.close:
+            raise PerformanceUnavailable(
+                f"SPY bar and strategy calculation disagree for {snapshot.session_date.isoformat()}"
+            )
+    return calculate_performance(
+        [
+            SpyOhlcBar(
+                session_date=item.session_date,
+                open_price=item.open,
+                high_price=item.high,
+                low_price=item.low,
+                close_price=item.close,
+            )
+            for item in selected_bars
+        ],
+        [
+            ExposureSchedulePoint(
+                session_date=snapshot.session_date,
+                open_exposure=open_exposure,
+                close_cap=close_cap,
+            )
+            for snapshot, open_exposure, close_cap, _ in visible
+        ],
+    )
+
+
+def _empty_strategy_chart(
+    canonical: list[SignalSnapshotRecord], *, message: str
+) -> StrategyChartView:
+    latest = canonical[-1] if canonical else None
+    return StrategyChartView(
+        available=False,
+        performance_available=False,
+        performance_empty_message="Historical rule replay needs two completed sessions.",
+        session_count=len(canonical),
+        start_date="—",
+        end_date="—",
+        performance_strategy_points="",
+        performance_spy_points="",
+        performance_high_label="—",
+        performance_midpoint_label="—",
+        performance_low_label="—",
+        latest_strategy_value="—",
+        latest_spy_value="—",
+        strategy_total_return="—",
+        spy_total_return="—",
+        drawdown_strategy_points="",
+        drawdown_spy_points="",
+        drawdown_high_label="—",
+        drawdown_midpoint_label="—",
+        drawdown_low_label="—",
+        strategy_max_drawdown="—",
+        spy_max_drawdown="—",
+        strategy_floor_reached=False,
+        exposure_open_path="",
+        exposure_empty_message="Historical exposure needs complete strategy sessions.",
+        exposure_invested_percent="—",
+        exposure_zero_sessions=0,
+        latest_open_exposure="—",
+        price_close_points="",
+        price_sma200_points="",
+        price_high_label="—",
+        price_midpoint_label="—",
+        price_low_label="—",
+        latest_close=_price(latest.spy_close) if latest else "—",
+        latest_sma200=_price(latest.sma200) if latest else "—",
+        price_relationship="",
+        risk_rv20_points="",
+        risk_dd20_points="",
+        risk_high_label="—",
+        risk_midpoint_label="—",
+        risk_low_label="—",
+        latest_rv20=_percentage(latest.rv20) if latest else "—",
+        latest_dd20=_percentage(latest.dd20) if latest else "—",
+        rv20_floor_y="",
+        rv20_zero_bonus_y="",
+        dd20_bonus_gate_y="",
+        event_lock_reference_visible=False,
+        event_lock_y="",
+        leverage_raw_target_points="",
+        leverage_effective_target_path="",
+        latest_raw_target=_multiple(latest.raw_target) if latest else "—",
+        latest_effective_target="—",
+        effective_target_start_date=None,
+        empty_message=message,
+    )
+
+
 def _strategy_chart_view(
     snapshots: list[SignalSnapshotRecord],
     transitions: list[EventStateRecord],
+    bars: list[SpyBarRecord],
     *,
     calendar: XnysCalendar,
 ) -> StrategyChartView:
     canonical = [item for item in snapshots if calendar.is_session(item.session_date)]
     if len(canonical) < 2:
-        return StrategyChartView(
-            available=False,
-            session_count=len(canonical),
-            start_date="—",
-            end_date="—",
-            price_close_points="",
-            price_sma200_points="",
-            price_high_label="—",
-            price_midpoint_label="—",
-            price_low_label="—",
-            latest_close=_price(canonical[-1].spy_close) if canonical else "—",
-            latest_sma200=_price(canonical[-1].sma200) if canonical else "—",
-            price_relationship="",
-            risk_rv20_points="",
-            risk_dd20_points="",
-            risk_high_label="—",
-            risk_midpoint_label="—",
-            risk_low_label="—",
-            latest_rv20=_percentage(canonical[-1].rv20) if canonical else "—",
-            latest_dd20=_percentage(canonical[-1].dd20) if canonical else "—",
-            rv20_floor_y="",
-            rv20_zero_bonus_y="",
-            dd20_bonus_gate_y="",
-            event_lock_reference_visible=False,
-            event_lock_y="",
-            leverage_raw_target_points="",
-            leverage_effective_target_path="",
-            latest_raw_target=_multiple(canonical[-1].raw_target) if canonical else "—",
-            latest_effective_target="—",
-            effective_target_start_date=None,
-            empty_message=(
-                f"Waiting for two completed strategy calculations ({len(canonical)} stored)."
-            ),
+        return _empty_strategy_chart(
+            canonical,
+            message=f"Waiting for two completed strategy calculations ({len(canonical)} stored).",
         )
 
     schedule_changes: list[tuple[datetime, Decimal]] = []
@@ -339,31 +453,67 @@ def _strategy_chart_view(
         if window is not None:
             schedule_changes.append((window.effective_at, snapshot.raw_target))
 
-    event_changes = _logical_event_cap_changes(transitions, calendar)
+    try:
+        event_changes = _logical_event_cap_changes(transitions, calendar)
+    except PerformanceUnavailable as exc:
+        return _empty_strategy_chart(
+            canonical,
+            message=f"Historical strategy replay unavailable: {exc}.",
+        )
     schedule_index = 0
     event_index = 0
     scheduled_target: Decimal | None = None
     effective_event_cap = MAX_TARGET
-    aligned: list[tuple[SignalSnapshotRecord, Decimal | None, Decimal]] = []
+    aligned: list[tuple[SignalSnapshotRecord, Decimal | None, Decimal, Decimal | None]] = []
     for snapshot in canonical:
+        session_open = calendar.session_open(snapshot.session_date)
         session_close = calendar.session_close(snapshot.session_date)
         while (
             schedule_index < len(schedule_changes)
-            and schedule_changes[schedule_index][0] <= session_close
+            and schedule_changes[schedule_index][0] <= session_open
         ):
             scheduled_target = schedule_changes[schedule_index][1]
             schedule_index += 1
-        while event_index < len(event_changes) and event_changes[event_index][0] <= session_close:
+        while event_index < len(event_changes) and event_changes[event_index][0] <= session_open:
             effective_event_cap = event_changes[event_index][1]
             event_index += 1
-        final_target = (
+        open_exposure = (
             None
             if scheduled_target is None
             else min(scheduled_target, effective_event_cap, MAX_TARGET)
         )
-        aligned.append((snapshot, final_target, effective_event_cap))
+        while event_index < len(event_changes) and event_changes[event_index][0] <= session_close:
+            effective_event_cap = event_changes[event_index][1]
+            event_index += 1
+        close_exposure = (
+            None
+            if scheduled_target is None
+            else min(scheduled_target, effective_event_cap, MAX_TARGET)
+        )
+        aligned.append((snapshot, open_exposure, effective_event_cap, close_exposure))
 
-    visible = aligned[-252:]
+    first_known = next((index for index, item in enumerate(aligned) if item[1] is not None), None)
+    if first_known is None or len(aligned) - first_known < 2:
+        return _empty_strategy_chart(
+            canonical,
+            message="Waiting for two sessions with a reconstructable effective target.",
+        )
+    known = aligned[first_known:]
+    if any(item[1] is None or item[3] is None for item in known):
+        return _empty_strategy_chart(
+            canonical,
+            message="Effective exposure history contains a gap.",
+        )
+    resolved = [
+        (snapshot, cast(Decimal, open_exposure), close_cap, cast(Decimal, close_exposure))
+        for snapshot, open_exposure, close_cap, close_exposure in known
+    ]
+    exposure_problem = None
+    if not _sessions_are_contiguous([item[0].session_date for item in resolved], calendar):
+        exposure_problem = (
+            "Historical exposure unavailable: completed strategy sessions contain a gap."
+        )
+    visible = resolved[-252:]
     x_step = Decimal(1000) / Decimal(len(visible) - 1)
     x_values = [x_step * index for index in range(len(visible))]
 
@@ -402,19 +552,124 @@ def _strategy_chart_view(
     risk_low, risk_high, risk_midpoint = _padded_domain(risk_domain_values)
 
     raw_targets = [item[0].raw_target for item in visible]
-    effective_targets = [item[1] for item in visible]
-    effective_start = next(
-        (item[0].session_date.isoformat() for item in visible if item[1] is not None), None
-    )
-    latest_effective = next(
-        (value for value in reversed(effective_targets) if value is not None), None
-    )
+    effective_targets = [item[3] for item in visible]
+    open_exposures = [item[1] for item in visible]
+    effective_start = visible[0][0].session_date.isoformat()
+    latest_effective = effective_targets[-1]
+
+    performance: PerformanceSeries | None = None
+    performance_problem: str | None = None
+    try:
+        performance = _performance_series(visible, bars, calendar=calendar)
+    except PerformanceUnavailable as exc:
+        performance_problem = f"Historical rule replay unavailable: {exc}."
+
+    if performance is not None:
+        performance_values = [point.strategy_value for point in performance.points] + [
+            point.spy_value for point in performance.points
+        ]
+        performance_low, performance_high, performance_midpoint = _padded_domain(performance_values)
+        strategy_values = [point.strategy_value for point in performance.points]
+        spy_values = [point.spy_value for point in performance.points]
+        strategy_drawdowns = [point.strategy_drawdown for point in performance.points]
+        spy_drawdowns = [point.spy_drawdown for point in performance.points]
+        drawdown_low = min(strategy_drawdowns + spy_drawdowns)
+        if drawdown_low == 0:
+            drawdown_low = Decimal("-0.01")
+        else:
+            drawdown_low *= Decimal("1.08")
+        drawdown_high = Decimal(0)
+        drawdown_midpoint = drawdown_low / Decimal(2)
+        latest_performance = performance.points[-1]
+        performance_strategy_points = _polyline_points(
+            strategy_values,
+            x_values=x_values,
+            low=performance_low,
+            high=performance_high,
+        )
+        performance_spy_points = _polyline_points(
+            spy_values,
+            x_values=x_values,
+            low=performance_low,
+            high=performance_high,
+        )
+        drawdown_strategy_points = _polyline_points(
+            strategy_drawdowns,
+            x_values=x_values,
+            low=drawdown_low,
+            high=drawdown_high,
+        )
+        drawdown_spy_points = _polyline_points(
+            spy_drawdowns,
+            x_values=x_values,
+            low=drawdown_low,
+            high=drawdown_high,
+        )
+    else:
+        performance_low = performance_high = performance_midpoint = Decimal(0)
+        drawdown_low = drawdown_high = drawdown_midpoint = Decimal(0)
+        latest_performance = None
+        performance_strategy_points = performance_spy_points = ""
+        drawdown_strategy_points = drawdown_spy_points = ""
 
     return StrategyChartView(
         available=True,
+        performance_available=performance is not None,
+        performance_empty_message=performance_problem,
         session_count=len(visible),
         start_date=visible[0][0].session_date.isoformat(),
         end_date=latest_snapshot.session_date.isoformat(),
+        performance_strategy_points=performance_strategy_points,
+        performance_spy_points=performance_spy_points,
+        performance_high_label=_money(performance_high) if performance else "—",
+        performance_midpoint_label=_money(performance_midpoint) if performance else "—",
+        performance_low_label=_money(performance_low) if performance else "—",
+        latest_strategy_value=_money(latest_performance.strategy_value)
+        if latest_performance
+        else "—",
+        latest_spy_value=_money(latest_performance.spy_value) if latest_performance else "—",
+        strategy_total_return=_percentage(
+            latest_performance.strategy_value / Decimal(100) - Decimal(1)
+        )
+        if latest_performance
+        else "—",
+        spy_total_return=_percentage(latest_performance.spy_value / Decimal(100) - Decimal(1))
+        if latest_performance
+        else "—",
+        drawdown_strategy_points=drawdown_strategy_points,
+        drawdown_spy_points=drawdown_spy_points,
+        drawdown_high_label=_percentage(drawdown_high) if performance else "—",
+        drawdown_midpoint_label=_percentage(drawdown_midpoint) if performance else "—",
+        drawdown_low_label=_percentage(drawdown_low) if performance else "—",
+        strategy_max_drawdown=_percentage(performance.strategy_max_drawdown)
+        if performance
+        else "—",
+        spy_max_drawdown=_percentage(performance.spy_max_drawdown) if performance else "—",
+        strategy_floor_reached=bool(
+            performance and any(point.strategy_at_floor for point in performance.points)
+        ),
+        exposure_open_path=(
+            _step_path(
+                open_exposures,
+                x_values=x_values,
+                low=Decimal(0),
+                high=MAX_TARGET,
+            )
+            if exposure_problem is None
+            else ""
+        ),
+        exposure_empty_message=exposure_problem,
+        exposure_invested_percent=(
+            _percentage(
+                Decimal(sum(value > 0 for value in open_exposures)) / Decimal(len(open_exposures))
+            )
+            if exposure_problem is None
+            else "—"
+        ),
+        exposure_zero_sessions=(
+            sum(value == 0 for value in open_exposures) if exposure_problem is None else 0
+        ),
+        latest_open_exposure=(_multiple(open_exposures[-1]) if exposure_problem is None else "—"),
         price_close_points=_polyline_points(
             close_values, x_values=x_values, low=price_low, high=price_high
         ),
@@ -544,6 +799,7 @@ def build_dashboard_view(
     strategy_chart = _strategy_chart_view(
         repository.latest_signal_snapshots(1000),
         repository.event_state_transition_history(2000),
+        repository.latest_spy_bars(1000),
         calendar=XNYS,
     )
     quote = repository.latest_mes_quote()

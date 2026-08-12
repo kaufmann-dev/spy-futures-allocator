@@ -192,6 +192,32 @@ dd { margin: 0.25rem 0 0; overflow-wrap: anywhere; font-weight: 700; font-varian
 .panel-heading .state-text { font-weight: 800; }
 
 .strategy-chart { margin: 0; }
+.chart-view-switcher { margin: 0 0 1rem; }
+.chart-view-switcher form {
+	display: grid;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	border: 1px solid var(--border);
+}
+.chart-view-switcher button {
+	min-width: 0;
+	min-height: 2.75rem;
+	padding: 0.45rem 0.6rem;
+	border: 0;
+	border-right: 1px solid var(--border);
+	border-radius: 0;
+	background: var(--bg);
+	color: var(--text);
+	cursor: pointer;
+	font: inherit;
+	font-size: 0.76rem;
+	font-weight: 750;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.chart-view-switcher button:last-child { border-right: 0; }
+.chart-view-switcher button:hover { background: var(--surface-strong); }
+.chart-view-switcher button[aria-current="true"] { background: var(--text); color: var(--bg); }
 .chart-band + .chart-band {
 	margin-top: 1.35rem;
 	padding-top: 1.35rem;
@@ -239,6 +265,7 @@ dd { margin: 0.25rem 0 0; overflow-wrap: anywhere; font-weight: 700; font-varian
 }
 .chart-plot { border-left: 1px solid var(--border); }
 .chart-plot-trend { height: clamp(11rem, 22vw, 15rem); }
+.chart-plot-primary { height: clamp(13rem, 26vw, 18rem); }
 .chart-plot-risk,
 .chart-plot-leverage { height: clamp(7rem, 14vw, 9rem); }
 .chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -259,6 +286,7 @@ dd { margin: 0.25rem 0 0; overflow-wrap: anywhere; font-weight: 700; font-varian
 	vector-effect: non-scaling-stroke;
 }
 .chart-line-close { stroke: var(--info); }
+.chart-line-spy-benchmark { stroke: var(--info); stroke-dasharray: 7 5; }
 .chart-line-sma { stroke: var(--warn); stroke-dasharray: 7 5; }
 .chart-line-rv20 { stroke: var(--info); }
 .chart-line-dd20 { stroke: var(--danger); stroke-dasharray: 7 5; }
@@ -360,6 +388,7 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1.5r
 	.result-grid { grid-template-columns: 1fr; }
 	.event-summary { grid-template-columns: 1fr; }
 	.chart-band-values { width: 100%; }
+	.chart-view-switcher button { padding-inline: 0.1rem; font-size: 0.66rem; letter-spacing: -0.01em; }
 	.chart-band-grid,
 	.chart-shared-x-axis { grid-template-columns: 3.5rem minmax(0, 1fr); }
 	footer { display: block; }

@@ -4,7 +4,7 @@ ARL-5 Simplified is a single-user, read-only website that calculates how many ME
 
 It cannot read an IBKR account or place, modify, approve, or cancel orders. Every result is notional sizing only; margin is not checked.
 
-The dashboard includes one synchronized strategy chart over the latest 252 completed sessions. Its three compact panels show SPY versus SMA200, RV20 and DD20 with their decision thresholds, and the raw versus effective final leverage target. It is derived from persisted strategy calculations and uses no browser-side charting service.
+The dashboard includes one switchable historical chart over the latest 252 completed sessions. It can show a normalized SPY-return rule replay against SPY, close-to-close drawdowns, invested versus zero-exposure periods, SPY versus SMA200, or RV20 and DD20 with their decision thresholds. The replay is a revised-data signal proxy rather than MES execution performance: it assumes fractional exposure at exact session open and close prices and excludes dividends, cash yield, futures basis and rolls, financing, fees, slippage, taxes, margin, and liquidation effects. The chart is derived from persisted IBKR bars and strategy calculations and uses no browser-side charting service.
 
 ## What gets deployed
 

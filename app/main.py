@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_ID = "ARL5-MES-SIZING-EVENTS-1.0.0"
 SAFE_MODEL = re.compile(r"^gpt-[A-Za-z0-9._-]{1,90}$")
+CHART_VIEWS = ("performance", "drawdowns", "exposure", "trend", "risk")
+
+
+def _chart_view(value: str | None) -> str:
+    return value if value in CHART_VIEWS else "performance"
 
 
 class SettingsPayload(BaseModel):
@@ -270,6 +275,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return login_redirect(request)
         csrf = _csrf_token(raw_session or "", config.session_secret.get_secret_value())
         view = dashboard(csrf=csrf)
+        chart_view = _chart_view(request.query_params.get("chart_view"))
         message_key = request.query_params.get("message")
         messages = {
             "settings-saved": "Settings saved. Data jobs will use the new configuration.",
@@ -282,6 +288,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "view": view,
                 "message": messages.get(message_key) if message_key is not None else None,
                 "error": None,
+                "chart_view": chart_view,
             },
         )
 
@@ -305,6 +312,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "view": dashboard(csrf=csrf),
                     "message": None,
                     "error": "Please correct the invalid settings values.",
+                    "chart_view": "performance",
                 },
                 status_code=422,
             )
@@ -357,6 +365,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         "view": dashboard(csrf=csrf),
                         "message": None,
                         "error": "The event check could not complete. No event window was changed.",
+                        "chart_view": "performance",
                     },
                     status_code=503,
                 )

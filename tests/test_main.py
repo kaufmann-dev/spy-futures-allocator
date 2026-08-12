@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 
 from app.config import AppConfig
-from app.main import create_app
+from app.main import _chart_view, create_app
 
 
 def config(tmp_path: Path) -> AppConfig:
@@ -29,6 +29,16 @@ def client(tmp_path: Path) -> httpx.AsyncClient:
         transport=httpx.ASGITransport(app=create_app(config(tmp_path))),
         base_url="https://arl5-simplified.example.test",
     )
+
+
+def test_chart_view_allowlist_defaults_to_performance() -> None:
+    assert _chart_view(None) == "performance"
+    assert _chart_view("performance") == "performance"
+    assert _chart_view("drawdowns") == "drawdowns"
+    assert _chart_view("exposure") == "exposure"
+    assert _chart_view("trend") == "trend"
+    assert _chart_view("risk") == "risk"
+    assert _chart_view("<script>") == "performance"
 
 
 async def test_public_health_is_minimal(tmp_path: Path) -> None:
