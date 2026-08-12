@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SVG_PATH = ROOT / "app" / "static" / "arl5-mark.svg"
+BASE_PATH = ROOT / "app" / "templates" / "base.html"
 DASHBOARD_PATH = ROOT / "app" / "templates" / "dashboard.html"
 
 
@@ -20,11 +21,12 @@ def test_logo_is_a_self_theming_standalone_svg() -> None:
     assert ' fill="' not in source
 
 
-def test_logo_is_rendered_only_in_the_dashboard_header() -> None:
-    template = DASHBOARD_PATH.read_text()
+def test_logo_is_used_only_as_the_document_favicon() -> None:
+    base = BASE_PATH.read_text()
+    dashboard = DASHBOARD_PATH.read_text()
 
-    header = template.split("</header>", maxsplit=1)[0]
-    remainder = template.split("</header>", maxsplit=1)[1]
-    assert header.count("/static/arl5-mark.svg") == 1
-    assert "/static/arl5-mark.svg" not in remainder
-    assert 'alt="" aria-hidden="true"' in header
+    head, body = base.split("</head>", maxsplit=1)
+    assert head.count("/static/arl5-mark.svg") == 1
+    assert 'rel="icon" type="image/svg+xml" sizes="any"' in head
+    assert "/static/arl5-mark.svg" not in body
+    assert "/static/arl5-mark.svg" not in dashboard
