@@ -4,6 +4,8 @@ ARL-5 Simplified is a single-user, read-only website that calculates how many ME
 
 It cannot read an IBKR account or place, modify, approve, or cancel orders. Every result is notional sizing only; margin is not checked.
 
+The dashboard includes one chart comparing completed SPY closes with the rolling SMA200 over the latest 252 chartable sessions. It is derived from persisted IBKR bars and uses no browser-side charting service.
+
 ## What gets deployed
 
 There is one Coolify application and one persistent SQLite volume. There is no PostgreSQL project, worker project, or separate scheduler service.

@@ -9,7 +9,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .models import RecommendationRecord
+from .models import RecommendationRecord, SpyBarRecord
 from .repository import Repository
 
 VIENNA = ZoneInfo("Europe/Vienna")
@@ -77,6 +77,23 @@ class StatusCell(SerializableView):
 class MetricRow(SerializableView):
     label: str
     value: str
+
+
+@dataclass(frozen=True, slots=True)
+class SpyTrendView(SerializableView):
+    available: bool
+    close_points: str
+    sma_points: str
+    session_count: int
+    start_date: str
+    end_date: str
+    high_label: str
+    midpoint_label: str
+    low_label: str
+    latest_close: str
+    latest_sma200: str
+    relationship: str
+    empty_message: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +182,7 @@ class HistoryRow(SerializableView):
 class DashboardView(SerializableView):
     recommendation: RecommendationView
     pending: PendingView | None
+    spy_trend: SpyTrendView
     calculation: tuple[MetricRow, ...]
     event: EventView
     statuses: tuple[StatusCell, ...]
@@ -180,6 +198,104 @@ class OperationalOverrides:
     ibkr_connection: str | None = None
     next_valid_signal: datetime | None = None
     next_execution_window: datetime | None = None
+
+
+def _plot_coordinate(value: Decimal, *, low: Decimal, high: Decimal) -> Decimal:
+    return (high - value) * Decimal(320) / (high - low)
+
+
+def _spy_trend_view(bars: list[SpyBarRecord]) -> SpyTrendView:
+    if len(bars) < 200:
+        return SpyTrendView(
+            available=False,
+            close_points="",
+            sma_points="",
+            session_count=0,
+            start_date="—",
+            end_date="—",
+            high_label="—",
+            midpoint_label="—",
+            low_label="—",
+            latest_close="—",
+            latest_sma200="—",
+            relationship="",
+            empty_message=(f"Waiting for 200 completed SPY sessions ({len(bars)} stored)."),
+        )
+
+    closes = [bar.close for bar in bars]
+    rolling_total = sum(closes[:200], start=Decimal(0))
+    series: list[tuple[SpyBarRecord, Decimal]] = [(bars[199], rolling_total / Decimal(200))]
+    for index in range(200, len(bars)):
+        rolling_total += closes[index] - closes[index - 200]
+        series.append((bars[index], rolling_total / Decimal(200)))
+
+    visible = series[-252:]
+    if len(visible) < 2:
+        latest_bar, latest_sma = visible[-1]
+        return SpyTrendView(
+            available=False,
+            close_points="",
+            sma_points="",
+            session_count=1,
+            start_date=latest_bar.session_date.isoformat(),
+            end_date=latest_bar.session_date.isoformat(),
+            high_label="—",
+            midpoint_label="—",
+            low_label="—",
+            latest_close=_price(latest_bar.close),
+            latest_sma200=_price(latest_sma),
+            relationship="",
+            empty_message=(
+                "One SMA200 point is available; one more completed session is needed "
+                "to draw the trend."
+            ),
+        )
+
+    values = [bar.close for bar, _ in visible] + [sma for _, sma in visible]
+    data_low = min(values)
+    data_high = max(values)
+    spread = data_high - data_low
+    padding = (
+        spread * Decimal("0.08") if spread else max(abs(data_high) * Decimal("0.01"), Decimal(1))
+    )
+    chart_low = data_low - padding
+    chart_high = data_high + padding
+    chart_midpoint = (chart_low + chart_high) / Decimal(2)
+    x_step = Decimal(1000) / Decimal(len(visible) - 1)
+
+    close_points: list[str] = []
+    sma_points: list[str] = []
+    for index, (bar, sma) in enumerate(visible):
+        x = x_step * index
+        close_y = _plot_coordinate(bar.close, low=chart_low, high=chart_high)
+        sma_y = _plot_coordinate(sma, low=chart_low, high=chart_high)
+        close_points.append(f"{x:.2f},{close_y:.2f}")
+        sma_points.append(f"{x:.2f},{sma_y:.2f}")
+
+    latest_bar, latest_sma = visible[-1]
+    distance = latest_bar.close / latest_sma - Decimal(1)
+    if distance > 0:
+        relationship = f"SPY is {_percentage(distance)} above its SMA200."
+    elif distance < 0:
+        relationship = f"SPY is {_percentage(abs(distance))} below its SMA200."
+    else:
+        relationship = "SPY is exactly at its SMA200."
+
+    return SpyTrendView(
+        available=True,
+        close_points=" ".join(close_points),
+        sma_points=" ".join(sma_points),
+        session_count=len(visible),
+        start_date=visible[0][0].session_date.isoformat(),
+        end_date=latest_bar.session_date.isoformat(),
+        high_label=_price(chart_high),
+        midpoint_label=_price(chart_midpoint),
+        low_label=_price(chart_low),
+        latest_close=_price(latest_bar.close),
+        latest_sma200=_price(latest_sma),
+        relationship=relationship,
+        empty_message=None,
+    )
 
 
 def _recommendation_state(
@@ -259,6 +375,7 @@ def build_dashboard_view(
     recommendation = repository.latest_recommendation()
     pending_record = repository.latest_recommendation(pending=True)
     snapshot = repository.latest_signal_snapshot()
+    spy_trend = _spy_trend_view(repository.latest_spy_bars(451))
     quote = repository.latest_mes_quote()
     contract = repository.latest_contract()
     current_target = repository.current_scheduled_target(now)
@@ -483,6 +600,7 @@ def build_dashboard_view(
     return DashboardView(
         recommendation=recommendation_view,
         pending=pending,
+        spy_trend=spy_trend,
         calculation=calculation,
         event=event_view,
         statuses=statuses,

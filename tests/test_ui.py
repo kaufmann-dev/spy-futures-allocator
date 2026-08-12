@@ -14,6 +14,7 @@ from app.db import (
     RecommendationRecord,
     Repository,
     ScheduledTargetRecord,
+    SpyBarRecord,
     build_dashboard_view,
 )
 
@@ -86,6 +87,31 @@ def _pending_target(repository: Repository, *, target: Decimal, effective_at: da
             calculated_at=NOW,
         )
     )
+
+
+def _spy_history(
+    repository: Repository,
+    *,
+    count: int = 452,
+    start_close: Decimal = Decimal(100),
+    daily_change: Decimal = Decimal(1),
+) -> None:
+    start = NOW - timedelta(days=count - 1)
+    for offset in range(count):
+        observed_at = start + timedelta(days=offset)
+        close = start_close + daily_change * offset
+        repository.append_spy_bar(
+            SpyBarRecord(
+                session_date=observed_at.date(),
+                open=close - Decimal("1"),
+                high=close + Decimal("1"),
+                low=close - Decimal("2"),
+                close=close,
+                volume=Decimal("1000000"),
+                completed_at=observed_at,
+                fetched_at=observed_at,
+            )
+        )
 
 
 def test_dashboard_has_exactly_eight_status_cells_and_live_result(tmp_path: Path) -> None:
@@ -206,10 +232,74 @@ def test_pending_recommendation_must_match_current_future_target(tmp_path: Path)
     assert view.pending is None
 
 
+def test_spy_trend_uses_one_year_and_exact_rolling_sma(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _spy_history(repository)
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.spy_trend.available
+    assert view.spy_trend.session_count == 252
+    assert view.spy_trend.start_date == (NOW - timedelta(days=251)).date().isoformat()
+    assert view.spy_trend.end_date == NOW.date().isoformat()
+    assert view.spy_trend.latest_close == "551.00"
+    assert view.spy_trend.latest_sma200 == "451.50"
+    assert view.spy_trend.relationship == "SPY is 22.04% above its SMA200."
+    assert len(view.spy_trend.close_points.split()) == 252
+    assert len(view.spy_trend.sma_points.split()) == 252
+    assert view.as_dict()["spy_trend"]["session_count"] == 252
+
+
+def test_spy_trend_waits_for_sufficient_completed_history(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _spy_history(repository, count=199)
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert not view.spy_trend.available
+    assert view.spy_trend.empty_message == ("Waiting for 200 completed SPY sessions (199 stored).")
+
+
+def test_spy_trend_waits_for_a_drawable_second_point(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _spy_history(repository, count=200)
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert not view.spy_trend.available
+    assert view.spy_trend.session_count == 1
+    assert view.spy_trend.latest_close == "299.00"
+    assert view.spy_trend.latest_sma200 == "199.50"
+    assert view.spy_trend.empty_message == (
+        "One SMA200 point is available; one more completed session is needed to draw the trend."
+    )
+
+
+def test_spy_trend_handles_flat_prices_without_invalid_coordinates(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _spy_history(
+        repository,
+        count=201,
+        start_close=Decimal(420),
+        daily_change=Decimal(0),
+    )
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.spy_trend.available
+    assert view.spy_trend.session_count == 2
+    assert view.spy_trend.latest_close == "420.00"
+    assert view.spy_trend.latest_sma200 == "420.00"
+    assert view.spy_trend.relationship == "SPY is exactly at its SMA200."
+    assert "NaN" not in view.spy_trend.close_points
+    assert "Infinity" not in view.spy_trend.sma_points
+
+
 def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _quote(repository, at=NOW)
     _recommendation(repository)
+    _spy_history(repository)
     repository.append_event_document(
         EventDocumentRecord(
             event_case_id=None,
@@ -237,3 +327,11 @@ def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: 
     assert "NOTIONAL SIZING ONLY — MARGIN NOT CHECKED" in html
     assert "It cannot place, modify, approve, or cancel orders." in html
     assert html.count('class="status-cell"') == 8
+    assert "SPY close and SMA200" in html
+    assert "252 completed sessions" in html
+    assert html.count("<svg") == 1
+    assert html.count("<polyline") == 2
+    assert 'role="img"' in html
+    assert "SPY close · solid" in html
+    assert "SMA200 · dashed" in html
+    assert "SPY is 22.04% above its SMA200." in html
