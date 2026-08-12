@@ -229,11 +229,11 @@ def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: 
         loader=FileSystemLoader(templates),
         autoescape=select_autoescape(["html"]),
     )
-    environment.globals["url_for"] = lambda name, **kwargs: f"/static/{kwargs['path'].lstrip('/')}"
-
     html = environment.get_template("dashboard.html").render(view=view)
 
     assert "HOLD NOW: 10 MES" in html
+    assert 'href="/static/app.css"' in html
+    assert "http://" not in html
     assert "NOTIONAL SIZING ONLY — MARGIN NOT CHECKED" in html
     assert "It cannot place, modify, approve, or cancel orders." in html
     assert html.count('class="status-cell"') == 8
