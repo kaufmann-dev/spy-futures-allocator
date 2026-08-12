@@ -191,53 +191,89 @@ dd { margin: 0.25rem 0 0; overflow-wrap: anywhere; font-weight: 700; font-varian
 .panel-heading > span { color: var(--muted); font-size: 0.72rem; text-align: right; }
 .panel-heading .state-text { font-weight: 800; }
 
-.trend-chart { margin: 0; }
-.chart-legend {
+.strategy-chart { margin: 0; }
+.chart-band + .chart-band {
+	margin-top: 1.35rem;
+	padding-top: 1.35rem;
+	border-top: 1px solid var(--border);
+}
+.chart-band-heading {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 0.65rem 1.5rem;
-	margin: 0 0 1rem;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0.45rem 1rem;
+}
+.chart-band-heading h3 { margin: 0; font-size: 0.88rem; }
+.chart-band-values {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.45rem 1.25rem;
+	margin: 0;
 	padding: 0;
 	list-style: none;
 }
-.chart-legend li { display: flex; align-items: center; gap: 0.5rem; font-size: 0.76rem; }
-.chart-legend strong { font-variant-numeric: tabular-nums; }
-.chart-swatch { width: 2rem; border-top: 3px solid var(--info); }
+.chart-band-values li { display: flex; align-items: center; gap: 0.42rem; font-size: 0.73rem; }
+.chart-band-values strong { font-variant-numeric: tabular-nums; }
+.chart-swatch { width: 1.7rem; border-top: 2px solid var(--info); }
 .chart-swatch-sma { border-top-color: var(--warn); border-top-style: dashed; }
-.chart-area { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.65rem; }
-.chart-area > div:last-child { min-width: 0; }
+.chart-swatch-dd20 { border-top-color: var(--danger); border-top-style: dashed; }
+.chart-swatch-raw { border-top-color: var(--warn); border-top-style: dashed; }
+.chart-swatch-effective { border-top-width: 3px; border-top-color: var(--live); }
+.chart-references { margin: 0.45rem 0 0.7rem; color: var(--muted); font-size: 0.69rem; }
+.chart-band-grid,
+.chart-shared-x-axis {
+	display: grid;
+	grid-template-columns: 4.25rem minmax(0, 1fr);
+	gap: 0.65rem;
+}
+.chart-band-grid > :last-child { min-width: 0; }
 .chart-y-axis {
 	display: flex;
 	flex-direction: column;
 	justify-content: space-between;
-	padding-bottom: 1.35rem;
 	color: var(--muted);
 	font-size: 0.68rem;
 	font-variant-numeric: tabular-nums;
 	text-align: right;
 }
-.chart-plot { height: clamp(14rem, 30vw, 22rem); border-left: 1px solid var(--border); }
+.chart-plot { border-left: 1px solid var(--border); }
+.chart-plot-trend { height: clamp(11rem, 22vw, 15rem); }
+.chart-plot-risk,
+.chart-plot-leverage { height: clamp(7rem, 14vw, 9rem); }
 .chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .chart-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-reference {
+	stroke-width: 1;
+	stroke-dasharray: 2 4;
+	vector-effect: non-scaling-stroke;
+}
+.chart-reference-rv20 { stroke: var(--info); }
+.chart-reference-dd20 { stroke: var(--danger); }
+.chart-reference-event { stroke: var(--danger); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .chart-line {
 	fill: none;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	stroke-width: 2.5;
+	stroke-width: 2;
 	vector-effect: non-scaling-stroke;
 }
 .chart-line-close { stroke: var(--info); }
 .chart-line-sma { stroke: var(--warn); stroke-dasharray: 7 5; }
-.chart-x-axis {
+.chart-line-rv20 { stroke: var(--info); }
+.chart-line-dd20 { stroke: var(--danger); stroke-dasharray: 7 5; }
+.chart-line-raw { stroke: var(--warn); stroke-dasharray: 4 4; }
+.chart-line-effective { stroke: var(--live); stroke-width: 3; stroke-linejoin: miter; }
+.chart-shared-x-axis { margin-top: 0.45rem; }
+.chart-shared-x-axis > div {
 	display: flex;
 	justify-content: space-between;
 	gap: 1rem;
-	padding-top: 0.45rem;
 	color: var(--muted);
 	font-size: 0.68rem;
 	font-variant-numeric: tabular-nums;
 }
-.trend-chart figcaption { margin-top: 0.8rem; color: var(--muted); font-size: 0.76rem; }
+.strategy-chart figcaption { margin-top: 0.8rem; color: var(--muted); font-size: 0.76rem; }
 
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
@@ -323,5 +359,8 @@ footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1.5r
 	.status-cell:nth-child(-n + 6) { border-bottom: 1px solid var(--border); }
 	.result-grid { grid-template-columns: 1fr; }
 	.event-summary { grid-template-columns: 1fr; }
+	.chart-band-values { width: 100%; }
+	.chart-band-grid,
+	.chart-shared-x-axis { grid-template-columns: 3.5rem minmax(0, 1fr); }
 	footer { display: block; }
 }

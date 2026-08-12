@@ -9,10 +9,14 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .models import RecommendationRecord, SpyBarRecord
+from app.domain.calculation import MAX_TARGET
+from app.domain.schedule import XnysCalendar, signal_window_for
+
+from .models import EventStateRecord, RecommendationRecord, SignalSnapshotRecord
 from .repository import Repository
 
 VIENNA = ZoneInfo("Europe/Vienna")
+XNYS = XnysCalendar()
 
 
 def _display_time(value: datetime | None) -> str:
@@ -80,19 +84,36 @@ class MetricRow(SerializableView):
 
 
 @dataclass(frozen=True, slots=True)
-class SpyTrendView(SerializableView):
+class StrategyChartView(SerializableView):
     available: bool
-    close_points: str
-    sma_points: str
     session_count: int
     start_date: str
     end_date: str
-    high_label: str
-    midpoint_label: str
-    low_label: str
+    price_close_points: str
+    price_sma200_points: str
+    price_high_label: str
+    price_midpoint_label: str
+    price_low_label: str
     latest_close: str
     latest_sma200: str
-    relationship: str
+    price_relationship: str
+    risk_rv20_points: str
+    risk_dd20_points: str
+    risk_high_label: str
+    risk_midpoint_label: str
+    risk_low_label: str
+    latest_rv20: str
+    latest_dd20: str
+    rv20_floor_y: str
+    rv20_zero_bonus_y: str
+    dd20_bonus_gate_y: str
+    event_lock_reference_visible: bool
+    event_lock_y: str
+    leverage_raw_target_points: str
+    leverage_effective_target_path: str
+    latest_raw_target: str
+    latest_effective_target: str
+    effective_target_start_date: str | None
     empty_message: str | None
 
 
@@ -182,7 +203,7 @@ class HistoryRow(SerializableView):
 class DashboardView(SerializableView):
     recommendation: RecommendationView
     pending: PendingView | None
-    spy_trend: SpyTrendView
+    strategy_chart: StrategyChartView
     calculation: tuple[MetricRow, ...]
     event: EventView
     statuses: tuple[StatusCell, ...]
@@ -201,79 +222,158 @@ class OperationalOverrides:
 
 
 def _plot_coordinate(value: Decimal, *, low: Decimal, high: Decimal) -> Decimal:
-    return (high - value) * Decimal(320) / (high - low)
+    return (high - value) * Decimal(100) / (high - low)
 
 
-def _spy_trend_view(bars: list[SpyBarRecord]) -> SpyTrendView:
-    if len(bars) < 200:
-        return SpyTrendView(
-            available=False,
-            close_points="",
-            sma_points="",
-            session_count=0,
-            start_date="—",
-            end_date="—",
-            high_label="—",
-            midpoint_label="—",
-            low_label="—",
-            latest_close="—",
-            latest_sma200="—",
-            relationship="",
-            empty_message=(f"Waiting for 200 completed SPY sessions ({len(bars)} stored)."),
-        )
-
-    closes = [bar.close for bar in bars]
-    rolling_total = sum(closes[:200], start=Decimal(0))
-    series: list[tuple[SpyBarRecord, Decimal]] = [(bars[199], rolling_total / Decimal(200))]
-    for index in range(200, len(bars)):
-        rolling_total += closes[index] - closes[index - 200]
-        series.append((bars[index], rolling_total / Decimal(200)))
-
-    visible = series[-252:]
-    if len(visible) < 2:
-        latest_bar, latest_sma = visible[-1]
-        return SpyTrendView(
-            available=False,
-            close_points="",
-            sma_points="",
-            session_count=1,
-            start_date=latest_bar.session_date.isoformat(),
-            end_date=latest_bar.session_date.isoformat(),
-            high_label="—",
-            midpoint_label="—",
-            low_label="—",
-            latest_close=_price(latest_bar.close),
-            latest_sma200=_price(latest_sma),
-            relationship="",
-            empty_message=(
-                "One SMA200 point is available; one more completed session is needed "
-                "to draw the trend."
-            ),
-        )
-
-    values = [bar.close for bar, _ in visible] + [sma for _, sma in visible]
+def _padded_domain(values: list[Decimal]) -> tuple[Decimal, Decimal, Decimal]:
     data_low = min(values)
     data_high = max(values)
     spread = data_high - data_low
     padding = (
-        spread * Decimal("0.08") if spread else max(abs(data_high) * Decimal("0.01"), Decimal(1))
+        spread * Decimal("0.08")
+        if spread
+        else max(abs(data_high) * Decimal("0.01"), Decimal("0.01"))
     )
-    chart_low = data_low - padding
-    chart_high = data_high + padding
-    chart_midpoint = (chart_low + chart_high) / Decimal(2)
+    low = data_low - padding
+    high = data_high + padding
+    return low, high, (low + high) / Decimal(2)
+
+
+def _polyline_points(
+    values: list[Decimal], *, x_values: list[Decimal], low: Decimal, high: Decimal
+) -> str:
+    return " ".join(
+        f"{x:.2f},{_plot_coordinate(value, low=low, high=high):.2f}"
+        for x, value in zip(x_values, values, strict=True)
+    )
+
+
+def _step_path(
+    values: list[Decimal | None], *, x_values: list[Decimal], low: Decimal, high: Decimal
+) -> str:
+    commands: list[str] = []
+    active = False
+    for x, value in zip(x_values, values, strict=True):
+        if value is None:
+            active = False
+            continue
+        y = _plot_coordinate(value, low=low, high=high)
+        if not active:
+            commands.append(f"M {x:.2f},{y:.2f}")
+            active = True
+            continue
+        commands.append(f"H {x:.2f} V {y:.2f}")
+    return " ".join(commands)
+
+
+def _logical_event_cap_changes(
+    transitions: list[EventStateRecord], calendar: XnysCalendar
+) -> list[tuple[datetime, Decimal, int]]:
+    changes: list[tuple[datetime, Decimal, int]] = []
+    zero_states = {"EVENT_LOCKED", "RECOVERY_TRACKING", "RECOVERY_CONFIRMED"}
+    for order, transition in enumerate(transitions):
+        if transition.state in zero_states:
+            session_date = transition.lock_session or transition.last_evaluated_session
+            if session_date is None or not calendar.is_session(session_date):
+                continue
+            effective_at = calendar.session_close(session_date)
+            cap = Decimal(0)
+        elif transition.state == "NO_EVENT" and transition.release_at is not None:
+            cap = MAX_TARGET
+            effective_at = transition.release_at
+        else:
+            # NO_EVENT, review, and active-window transitions leave the normal
+            # 4.85 cap unchanged. Only an explicit recovery release can lift a
+            # previously persisted zero cap.
+            continue
+        changes.append((effective_at, cap, order))
+    return sorted(changes, key=lambda item: (item[0], item[2]))
+
+
+def _strategy_chart_view(
+    snapshots: list[SignalSnapshotRecord],
+    transitions: list[EventStateRecord],
+    *,
+    calendar: XnysCalendar,
+) -> StrategyChartView:
+    canonical = [item for item in snapshots if calendar.is_session(item.session_date)]
+    if len(canonical) < 2:
+        return StrategyChartView(
+            available=False,
+            session_count=len(canonical),
+            start_date="—",
+            end_date="—",
+            price_close_points="",
+            price_sma200_points="",
+            price_high_label="—",
+            price_midpoint_label="—",
+            price_low_label="—",
+            latest_close=_price(canonical[-1].spy_close) if canonical else "—",
+            latest_sma200=_price(canonical[-1].sma200) if canonical else "—",
+            price_relationship="",
+            risk_rv20_points="",
+            risk_dd20_points="",
+            risk_high_label="—",
+            risk_midpoint_label="—",
+            risk_low_label="—",
+            latest_rv20=_percentage(canonical[-1].rv20) if canonical else "—",
+            latest_dd20=_percentage(canonical[-1].dd20) if canonical else "—",
+            rv20_floor_y="",
+            rv20_zero_bonus_y="",
+            dd20_bonus_gate_y="",
+            event_lock_reference_visible=False,
+            event_lock_y="",
+            leverage_raw_target_points="",
+            leverage_effective_target_path="",
+            latest_raw_target=_multiple(canonical[-1].raw_target) if canonical else "—",
+            latest_effective_target="—",
+            effective_target_start_date=None,
+            empty_message=(
+                f"Waiting for two completed strategy calculations ({len(canonical)} stored)."
+            ),
+        )
+
+    schedule_changes: list[tuple[datetime, Decimal]] = []
+    for snapshot in canonical:
+        window = signal_window_for(snapshot.session_date, calendar)
+        if window is not None:
+            schedule_changes.append((window.effective_at, snapshot.raw_target))
+
+    event_changes = _logical_event_cap_changes(transitions, calendar)
+    schedule_index = 0
+    event_index = 0
+    scheduled_target: Decimal | None = None
+    effective_event_cap = MAX_TARGET
+    aligned: list[tuple[SignalSnapshotRecord, Decimal | None, Decimal]] = []
+    for snapshot in canonical:
+        session_close = calendar.session_close(snapshot.session_date)
+        while (
+            schedule_index < len(schedule_changes)
+            and schedule_changes[schedule_index][0] <= session_close
+        ):
+            scheduled_target = schedule_changes[schedule_index][1]
+            schedule_index += 1
+        while event_index < len(event_changes) and event_changes[event_index][0] <= session_close:
+            effective_event_cap = event_changes[event_index][1]
+            event_index += 1
+        final_target = (
+            None
+            if scheduled_target is None
+            else min(scheduled_target, effective_event_cap, MAX_TARGET)
+        )
+        aligned.append((snapshot, final_target, effective_event_cap))
+
+    visible = aligned[-252:]
     x_step = Decimal(1000) / Decimal(len(visible) - 1)
+    x_values = [x_step * index for index in range(len(visible))]
 
-    close_points: list[str] = []
-    sma_points: list[str] = []
-    for index, (bar, sma) in enumerate(visible):
-        x = x_step * index
-        close_y = _plot_coordinate(bar.close, low=chart_low, high=chart_high)
-        sma_y = _plot_coordinate(sma, low=chart_low, high=chart_high)
-        close_points.append(f"{x:.2f},{close_y:.2f}")
-        sma_points.append(f"{x:.2f},{sma_y:.2f}")
+    price_values = [item[0].spy_close for item in visible] + [item[0].sma200 for item in visible]
+    price_low, price_high, price_midpoint = _padded_domain(price_values)
+    close_values = [item[0].spy_close for item in visible]
+    sma_values = [item[0].sma200 for item in visible]
 
-    latest_bar, latest_sma = visible[-1]
-    distance = latest_bar.close / latest_sma - Decimal(1)
+    latest_snapshot = visible[-1][0]
+    distance = latest_snapshot.spy_close / latest_snapshot.sma200 - Decimal(1)
     if distance > 0:
         relationship = f"SPY is {_percentage(distance)} above its SMA200."
     elif distance < 0:
@@ -281,19 +381,85 @@ def _spy_trend_view(bars: list[SpyBarRecord]) -> SpyTrendView:
     else:
         relationship = "SPY is exactly at its SMA200."
 
-    return SpyTrendView(
+    event_lock_reference_visible = any(item[2] == 0 for item in visible) or bool(
+        transitions
+        and transitions[-1].state
+        in {"WINDOW_ACTIVE", "EVENT_LOCKED", "RECOVERY_TRACKING", "RECOVERY_CONFIRMED"}
+    )
+    rv20_values = [item[0].rv20 for item in visible]
+    dd20_values = [item[0].dd20 for item in visible]
+    risk_domain_values = (
+        rv20_values
+        + dd20_values
+        + [
+            Decimal("0.08"),
+            Decimal("0.20"),
+            Decimal("-0.01"),
+        ]
+    )
+    if event_lock_reference_visible:
+        risk_domain_values.append(Decimal("-0.04"))
+    risk_low, risk_high, risk_midpoint = _padded_domain(risk_domain_values)
+
+    raw_targets = [item[0].raw_target for item in visible]
+    effective_targets = [item[1] for item in visible]
+    effective_start = next(
+        (item[0].session_date.isoformat() for item in visible if item[1] is not None), None
+    )
+    latest_effective = next(
+        (value for value in reversed(effective_targets) if value is not None), None
+    )
+
+    return StrategyChartView(
         available=True,
-        close_points=" ".join(close_points),
-        sma_points=" ".join(sma_points),
         session_count=len(visible),
         start_date=visible[0][0].session_date.isoformat(),
-        end_date=latest_bar.session_date.isoformat(),
-        high_label=_price(chart_high),
-        midpoint_label=_price(chart_midpoint),
-        low_label=_price(chart_low),
-        latest_close=_price(latest_bar.close),
-        latest_sma200=_price(latest_sma),
-        relationship=relationship,
+        end_date=latest_snapshot.session_date.isoformat(),
+        price_close_points=_polyline_points(
+            close_values, x_values=x_values, low=price_low, high=price_high
+        ),
+        price_sma200_points=_polyline_points(
+            sma_values, x_values=x_values, low=price_low, high=price_high
+        ),
+        price_high_label=_price(price_high),
+        price_midpoint_label=_price(price_midpoint),
+        price_low_label=_price(price_low),
+        latest_close=_price(latest_snapshot.spy_close),
+        latest_sma200=_price(latest_snapshot.sma200),
+        price_relationship=relationship,
+        risk_rv20_points=_polyline_points(
+            rv20_values, x_values=x_values, low=risk_low, high=risk_high
+        ),
+        risk_dd20_points=_polyline_points(
+            dd20_values, x_values=x_values, low=risk_low, high=risk_high
+        ),
+        risk_high_label=_percentage(risk_high),
+        risk_midpoint_label=_percentage(risk_midpoint),
+        risk_low_label=_percentage(risk_low),
+        latest_rv20=_percentage(latest_snapshot.rv20),
+        latest_dd20=_percentage(latest_snapshot.dd20),
+        rv20_floor_y=f"{_plot_coordinate(Decimal('0.08'), low=risk_low, high=risk_high):.2f}",
+        rv20_zero_bonus_y=(
+            f"{_plot_coordinate(Decimal('0.20'), low=risk_low, high=risk_high):.2f}"
+        ),
+        dd20_bonus_gate_y=(
+            f"{_plot_coordinate(Decimal('-0.01'), low=risk_low, high=risk_high):.2f}"
+        ),
+        event_lock_reference_visible=event_lock_reference_visible,
+        event_lock_y=(
+            f"{_plot_coordinate(Decimal('-0.04'), low=risk_low, high=risk_high):.2f}"
+            if event_lock_reference_visible
+            else ""
+        ),
+        leverage_raw_target_points=_polyline_points(
+            raw_targets, x_values=x_values, low=Decimal(0), high=MAX_TARGET
+        ),
+        leverage_effective_target_path=_step_path(
+            effective_targets, x_values=x_values, low=Decimal(0), high=MAX_TARGET
+        ),
+        latest_raw_target=_multiple(latest_snapshot.raw_target),
+        latest_effective_target=_multiple(latest_effective),
+        effective_target_start_date=effective_start,
         empty_message=None,
     )
 
@@ -375,7 +541,11 @@ def build_dashboard_view(
     recommendation = repository.latest_recommendation()
     pending_record = repository.latest_recommendation(pending=True)
     snapshot = repository.latest_signal_snapshot()
-    spy_trend = _spy_trend_view(repository.latest_spy_bars(451))
+    strategy_chart = _strategy_chart_view(
+        repository.latest_signal_snapshots(1000),
+        repository.event_state_transition_history(2000),
+        calendar=XNYS,
+    )
     quote = repository.latest_mes_quote()
     contract = repository.latest_contract()
     current_target = repository.current_scheduled_target(now)
@@ -600,7 +770,7 @@ def build_dashboard_view(
     return DashboardView(
         recommendation=recommendation_view,
         pending=pending,
-        spy_trend=spy_trend,
+        strategy_chart=strategy_chart,
         calculation=calculation,
         event=event_view,
         statuses=statuses,

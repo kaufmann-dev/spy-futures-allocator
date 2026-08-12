@@ -283,6 +283,28 @@ class Repository:
             ).fetchone()
         return None if row is None else self._signal_snapshot(row)
 
+    def latest_signal_snapshots(self, limit: int = 260) -> list[SignalSnapshotRecord]:
+        """Return the latest immutable revision for each recent session chronologically."""
+
+        limit = _bounded_limit(limit, maximum=1000)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY session_date
+                        ORDER BY calculated_at DESC, id DESC
+                    ) AS revision_rank
+                    FROM signal_snapshots
+                )
+                WHERE revision_rank = 1
+                ORDER BY session_date DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._signal_snapshot(row) for row in reversed(rows)]
+
     def signal_snapshot_history(self, limit: int = 260) -> list[SignalSnapshotRecord]:
         """Return recent raw-target snapshots in chronological order."""
 
@@ -735,6 +757,20 @@ class Repository:
                 (event_case_id, limit),
             ).fetchall()
         return [self._event_state(row) for row in rows]
+
+    def event_state_transition_history(self, limit: int = 100) -> list[EventStateRecord]:
+        """Return recent transitions across all event cases in chronological order."""
+
+        limit = _bounded_limit(limit, maximum=2000)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM event_state_transitions
+                ORDER BY occurred_at DESC, id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._event_state(row) for row in reversed(rows)]
 
     def append_audit(self, record: AuditEntry) -> AuditEntry:
         with self.database.transaction() as connection:

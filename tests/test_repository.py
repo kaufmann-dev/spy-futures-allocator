@@ -10,6 +10,7 @@ from app.db import (
     AuditEntry,
     ContractRecord,
     Database,
+    EventCaseRecord,
     EventEvidenceRecord,
     EventModelRunRecord,
     EventStateRecord,
@@ -147,6 +148,41 @@ def test_signal_history_and_lookup_are_bounded_and_chronological(repository: Rep
         repository.signal_snapshot_history(0)
 
 
+def test_latest_signal_snapshots_deduplicates_before_limiting(repository: Repository) -> None:
+    snapshots = [
+        (date(2026, 8, 8), Decimal("8"), datetime(2026, 8, 8, 22, tzinfo=UTC)),
+        (date(2026, 8, 9), Decimal("9"), datetime(2026, 8, 9, 22, tzinfo=UTC)),
+        (date(2026, 8, 10), Decimal("10"), datetime(2026, 8, 10, 22, tzinfo=UTC)),
+        (date(2026, 8, 10), Decimal("10.1"), datetime(2026, 8, 10, 23, tzinfo=UTC)),
+    ]
+    for session_date, raw_target, calculated_at in snapshots:
+        repository.append_signal_snapshot(
+            SignalSnapshotRecord(
+                session_date=session_date,
+                spy_close=Decimal("700"),
+                sma200=Decimal("600"),
+                distance_above_sma200=Decimal("0.1"),
+                daily_return=Decimal("0.01"),
+                rv20=Decimal("0.12"),
+                prior_20_session_high=Decimal("705"),
+                dd20=Decimal("-0.007"),
+                base=Decimal("4.85"),
+                bonus=Decimal("0.6"),
+                volatility_cap=Decimal("8.3333"),
+                raw_target=raw_target,
+                shadow_raw_target=raw_target,
+                calculated_at=calculated_at,
+            )
+        )
+
+    latest = repository.latest_signal_snapshots(2)
+
+    assert [item.session_date for item in latest] == [date(2026, 8, 9), date(2026, 8, 10)]
+    assert [item.raw_target for item in latest] == [Decimal("9"), Decimal("10.1")]
+    with pytest.raises(ValueError):
+        repository.latest_signal_snapshots(0)
+
+
 def test_incomplete_evidence_can_exist_without_event_case(repository: Repository) -> None:
     model_run = repository.append_event_model_run(
         EventModelRunRecord(
@@ -193,6 +229,51 @@ def test_event_recovery_state_round_trips_all_restart_fields(repository: Reposit
 
     loaded = repository.latest_event_state()
     assert loaded == record
+
+
+def test_event_state_transition_history_is_global_and_chronological(
+    repository: Repository,
+) -> None:
+    cases = [
+        repository.upsert_event_case(
+            EventCaseRecord(
+                event_key=f"event-{index}",
+                event_type="PANDEMIC",
+                original_timestamp=NOW,
+                window_start=NOW,
+                window_end=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        for index in range(2)
+    ]
+    assert cases[0].id is not None
+    assert cases[1].id is not None
+
+    transitions = [
+        (cases[0].id, "late", datetime(2026, 8, 12, 14, 33, tzinfo=UTC)),
+        (cases[1].id, "oldest", datetime(2026, 8, 12, 14, 31, tzinfo=UTC)),
+        (cases[0].id, "same-time-first", datetime(2026, 8, 12, 14, 32, tzinfo=UTC)),
+        (cases[1].id, "same-time-second", datetime(2026, 8, 12, 14, 32, tzinfo=UTC)),
+    ]
+    for event_case_id, reason, occurred_at in transitions:
+        repository.append_event_state(
+            EventStateRecord(
+                event_case_id=event_case_id,
+                state="WINDOW_ACTIVE",
+                event_cap=Decimal("4.85"),
+                reason=reason,
+                occurred_at=occurred_at,
+            )
+        )
+
+    history = repository.event_state_transition_history(3)
+
+    assert [item.reason for item in history] == ["same-time-first", "same-time-second", "late"]
+    assert {item.event_case_id for item in history} == {cases[0].id, cases[1].id}
+    with pytest.raises(ValueError):
+        repository.event_state_transition_history(0)
 
 
 def test_recommendation_and_audit_history_are_bounded(repository: Repository) -> None:

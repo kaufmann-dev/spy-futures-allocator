@@ -71,42 +71,103 @@
 	</section>
 	{% endif %}
 
-	<section class="panel trend-panel" aria-labelledby="spy-trend-heading">
+	<section class="panel strategy-chart-panel" aria-labelledby="strategy-chart-heading">
 		<div class="panel-heading">
-			<h2 id="spy-trend-heading">SPY close and SMA200</h2>
-			<span>{% if view.spy_trend.available %}{{ view.spy_trend.session_count }} completed sessions{% else %}Completed sessions only{% endif %}</span>
+			<h2 id="strategy-chart-heading">Strategy chart</h2>
+			<span>{% if view.strategy_chart.available %}{{ view.strategy_chart.session_count }} completed sessions{% else %}Completed sessions only{% endif %}</span>
 		</div>
-		{% if view.spy_trend.available %}
-		<figure class="trend-chart">
-			<ul class="chart-legend" aria-label="Chart series and latest values">
-				<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY close · solid</span><strong>{{ view.spy_trend.latest_close }}</strong></li>
-				<li><i class="chart-swatch chart-swatch-sma" aria-hidden="true"></i><span>SMA200 · dashed</span><strong>{{ view.spy_trend.latest_sma200 }}</strong></li>
-			</ul>
-			<div class="chart-area">
-				<div class="chart-y-axis" aria-hidden="true">
-					<span>{{ view.spy_trend.high_label }}</span>
-					<span>{{ view.spy_trend.midpoint_label }}</span>
-					<span>{{ view.spy_trend.low_label }}</span>
+		{% if view.strategy_chart.available %}
+		<figure class="strategy-chart">
+			<div class="chart-band" role="group" aria-labelledby="trend-band-heading">
+				<div class="chart-band-heading">
+					<h3 id="trend-band-heading">SPY trend</h3>
+					<ul class="chart-band-values" aria-label="Latest SPY trend values">
+						<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY close · solid</span><strong>{{ view.strategy_chart.latest_close }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-sma" aria-hidden="true"></i><span>SMA200 · dashed</span><strong>{{ view.strategy_chart.latest_sma200 }}</strong></li>
+					</ul>
 				</div>
-				<div>
-					<div class="chart-plot">
-						<svg viewBox="0 0 1000 320" preserveAspectRatio="none" role="img" aria-labelledby="spy-chart-title spy-chart-description">
-							<title id="spy-chart-title">SPY close and 200-session moving average</title>
-							<desc id="spy-chart-description">SPY close is the solid line and SMA200 is the dashed line across {{ view.spy_trend.session_count }} completed sessions from {{ view.spy_trend.start_date }} through {{ view.spy_trend.end_date }}. {{ view.spy_trend.relationship }}</desc>
+				<div class="chart-band-grid">
+					<div class="chart-y-axis" aria-hidden="true">
+						<span>{{ view.strategy_chart.price_high_label }}</span>
+						<span>{{ view.strategy_chart.price_midpoint_label }}</span>
+						<span>{{ view.strategy_chart.price_low_label }}</span>
+					</div>
+					<div class="chart-plot chart-plot-trend">
+						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-trend-title strategy-trend-description">
+							<title id="strategy-trend-title">SPY close and 200-session moving average</title>
+							<desc id="strategy-trend-description">SPY close is the solid line and SMA200 is the dashed line across {{ view.strategy_chart.session_count }} completed sessions. {{ view.strategy_chart.price_relationship }}</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" />
-							<line class="chart-grid" x1="0" y1="160" x2="1000" y2="160" />
-							<line class="chart-grid" x1="0" y1="320" x2="1000" y2="320" />
-							<polyline class="chart-line chart-line-close" points="{{ view.spy_trend.close_points }}" />
-							<polyline class="chart-line chart-line-sma" points="{{ view.spy_trend.sma_points }}" />
+							<line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" />
+							<line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
+							<polyline class="chart-line chart-line-close" points="{{ view.strategy_chart.price_close_points }}" />
+							<polyline class="chart-line chart-line-sma" points="{{ view.strategy_chart.price_sma200_points }}" />
 						</svg>
 					</div>
-					<div class="chart-x-axis" aria-hidden="true"><span>{{ view.spy_trend.start_date }}</span><span>{{ view.spy_trend.end_date }}</span></div>
 				</div>
 			</div>
-			<figcaption>{{ view.spy_trend.relationship }} The chart covers {{ view.spy_trend.start_date }} through {{ view.spy_trend.end_date }} and uses completed regular-session closes only.</figcaption>
+
+			<div class="chart-band" role="group" aria-labelledby="risk-band-heading">
+				<div class="chart-band-heading">
+					<h3 id="risk-band-heading">Volatility and drawdown</h3>
+					<ul class="chart-band-values" aria-label="Latest volatility and drawdown values">
+						<li><i class="chart-swatch chart-swatch-rv20" aria-hidden="true"></i><span>RV20 · solid</span><strong>{{ view.strategy_chart.latest_rv20 }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-dd20" aria-hidden="true"></i><span>DD20 · dashed</span><strong>{{ view.strategy_chart.latest_dd20 }}</strong></li>
+					</ul>
+				</div>
+				<p class="chart-references">RV20 volatility floor/full bonus: 8% · RV20 zero bonus: 20% · DD20 bonus gate: −1%{% if view.strategy_chart.event_lock_reference_visible %} · Qualified-event lock gate: −4%{% endif %}</p>
+				<div class="chart-band-grid">
+					<div class="chart-y-axis" aria-hidden="true">
+						<span>{{ view.strategy_chart.risk_high_label }}</span>
+						<span>{{ view.strategy_chart.risk_midpoint_label }}</span>
+						<span>{{ view.strategy_chart.risk_low_label }}</span>
+					</div>
+					<div class="chart-plot chart-plot-risk">
+						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-risk-title strategy-risk-description">
+							<title id="strategy-risk-title">RV20 volatility and DD20 drawdown</title>
+							<desc id="strategy-risk-description">RV20 is the solid line and DD20 is the dashed line. Reference lines show the 8 and 20 percent RV20 thresholds and the negative 1 percent DD20 bonus gate{% if view.strategy_chart.event_lock_reference_visible %}, plus the negative 4 percent qualified-event lock gate{% endif %}.</desc>
+							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" />
+							<line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" />
+							<line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
+							<line class="chart-reference chart-reference-rv20" x1="0" y1="{{ view.strategy_chart.rv20_floor_y }}" x2="1000" y2="{{ view.strategy_chart.rv20_floor_y }}" />
+							<line class="chart-reference chart-reference-rv20" x1="0" y1="{{ view.strategy_chart.rv20_zero_bonus_y }}" x2="1000" y2="{{ view.strategy_chart.rv20_zero_bonus_y }}" />
+							<line class="chart-reference chart-reference-dd20" x1="0" y1="{{ view.strategy_chart.dd20_bonus_gate_y }}" x2="1000" y2="{{ view.strategy_chart.dd20_bonus_gate_y }}" />
+							{% if view.strategy_chart.event_lock_reference_visible %}<line class="chart-reference chart-reference-event" x1="0" y1="{{ view.strategy_chart.event_lock_y }}" x2="1000" y2="{{ view.strategy_chart.event_lock_y }}" />{% endif %}
+							<polyline class="chart-line chart-line-rv20" points="{{ view.strategy_chart.risk_rv20_points }}" />
+							<polyline class="chart-line chart-line-dd20" points="{{ view.strategy_chart.risk_dd20_points }}" />
+						</svg>
+					</div>
+				</div>
+			</div>
+
+			<div class="chart-band" role="group" aria-labelledby="leverage-band-heading">
+				<div class="chart-band-heading">
+					<h3 id="leverage-band-heading">Leverage target</h3>
+					<ul class="chart-band-values" aria-label="Latest leverage target values">
+						<li><i class="chart-swatch chart-swatch-raw" aria-hidden="true"></i><span>Raw target · dashed</span><strong>{{ view.strategy_chart.latest_raw_target }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>Effective final · stepped</span><strong>{{ view.strategy_chart.latest_effective_target }}</strong></li>
+					</ul>
+				</div>
+				<div class="chart-band-grid">
+					<div class="chart-y-axis" aria-hidden="true"><span>4.85×</span><span>2.43×</span><span>0.00×</span></div>
+					<div class="chart-plot chart-plot-leverage">
+						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-leverage-title strategy-leverage-description">
+							<title id="strategy-leverage-title">Raw and effective final leverage targets</title>
+							<desc id="strategy-leverage-description">The raw daily target is dashed. The effective final target is stepped because ordinary target changes occur only at valid Tuesday and Friday execution windows, and an event lock can cap leverage at zero.</desc>
+							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" />
+							<line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" />
+							<line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
+							<polyline class="chart-line chart-line-raw" points="{{ view.strategy_chart.leverage_raw_target_points }}" />
+							{% if view.strategy_chart.leverage_effective_target_path %}<path class="chart-line chart-line-effective" d="{{ view.strategy_chart.leverage_effective_target_path }}" />{% endif %}
+						</svg>
+					</div>
+				</div>
+			</div>
+
+			<div class="chart-shared-x-axis" aria-hidden="true"><span></span><div><span>{{ view.strategy_chart.start_date }}</span><span>{{ view.strategy_chart.end_date }}</span></div></div>
+			<figcaption>{{ view.strategy_chart.price_relationship }} All three panels cover {{ view.strategy_chart.start_date }} through {{ view.strategy_chart.end_date }} and use completed SPY regular-session calculations. {% if view.strategy_chart.effective_target_start_date %}The effective series is reconstructable from {{ view.strategy_chart.effective_target_start_date }} and changes only at valid strategy windows or an event lock.{% else %}No effective target is reconstructable in this range yet.{% endif %}</figcaption>
 		</figure>
 		{% else %}
-		<p class="empty-state">{{ view.spy_trend.empty_message }}</p>
+		<p class="empty-state">{{ view.strategy_chart.empty_message }}</p>
 		{% endif %}
 	</section>
 
