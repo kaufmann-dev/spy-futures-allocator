@@ -38,12 +38,14 @@ def _login_page(return_to: str, *, error: str | None = None, logged_out: bool = 
 <link rel="icon" type="image/svg+xml" sizes="any" href="/static/arl5-mark.svg">
 <style>
 :root {{ color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }}
+*, *::before, *::after {{ box-sizing: border-box; }}
 body {{
-  box-sizing: border-box; margin: 0; min-height: 100vh; display: grid; place-items: center;
+  margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center;
+  padding: 1rem;
   background: #f5f5f0; color: #111;
 }}
 main {{
-  width: min(28rem, calc(100% - 3rem)); border: 1px solid currentColor;
+  width: min(28rem, 100%); border: 1px solid currentColor;
   padding: 2rem; background: #fff;
 }}
 h1 {{ font-size: 1.5rem; margin: 0 0 .5rem; }}
@@ -54,9 +56,6 @@ button {{
 }}
 .status {{ border-left: 3px solid #157347; padding-left: .75rem; }}
 .error {{ border-color: #b42318; color: #b42318; }}
-@media (max-width: 40rem) {{
-  body {{ min-height: 100dvh; place-items: start center; padding: 2rem 0; }}
-}}
 @media (prefers-color-scheme: dark) {{
   body {{ background: #111; color: #eee; }}
   main {{ background: #181818; }}

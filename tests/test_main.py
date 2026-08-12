@@ -57,15 +57,16 @@ async def test_protected_page_stops_at_app_owned_login(tmp_path: Path) -> None:
     assert "form-action 'self' https://id.example.test" in login.headers["content-security-policy"]
 
 
-async def test_login_top_aligns_on_mobile_viewports(tmp_path: Path) -> None:
+async def test_login_card_is_centered_and_contained_on_mobile(tmp_path: Path) -> None:
     async with client(tmp_path) as browser:
         login = await browser.get("/login")
 
     assert login.status_code == 200
-    assert "@media (max-width: 40rem)" in login.text
+    assert "*, *::before, *::after { box-sizing: border-box; }" in login.text
     assert "min-height: 100dvh" in login.text
-    assert "place-items: start center" in login.text
-    assert "padding: 2rem 0" in login.text
+    assert "place-items: center" in login.text
+    assert "padding: 1rem" in login.text
+    assert "width: min(28rem, 100%)" in login.text
 
 
 async def test_passive_api_requires_session(tmp_path: Path) -> None:
