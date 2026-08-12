@@ -35,10 +35,11 @@ def _login_page(return_to: str, *, error: str | None = None, logged_out: bool = 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in · ARL-5 Simplified</title>
+<link rel="icon" type="image/svg+xml" sizes="any" href="/static/arl5-mark.svg">
 <style>
 :root {{ color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }}
 body {{
-  margin: 0; min-height: 100vh; display: grid; place-items: center;
+  box-sizing: border-box; margin: 0; min-height: 100vh; display: grid; place-items: center;
   background: #f5f5f0; color: #111;
 }}
 main {{
@@ -53,6 +54,9 @@ button {{
 }}
 .status {{ border-left: 3px solid #157347; padding-left: .75rem; }}
 .error {{ border-color: #b42318; color: #b42318; }}
+@media (max-width: 40rem) {{
+  body {{ min-height: 100dvh; place-items: start center; padding: 2rem 0; }}
+}}
 @media (prefers-color-scheme: dark) {{
   body {{ background: #111; color: #eee; }}
   main {{ background: #181818; }}
