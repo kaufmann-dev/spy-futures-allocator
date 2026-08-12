@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}ARL-5 MES Sizing and Event Monitor{% endblock %}
+{% block body %}
+<header class="site-header">
+	<div>
+		<a class="wordmark" href="/">ARL-5 <span>SIMPLIFIED</span></a>
+		<p>MES sizing and systemic-event monitor</p>
+	</div>
+	<form action="/auth/logout" method="post">
+		<button class="button button-secondary" type="submit">Sign out</button>
+	</form>
+</header>
+
+<main id="main-content" class="page-shell">
+	<section class="status-strip" aria-label="System status">
+		{% for item in view.statuses %}
+		<div class="status-cell">
+			<span class="status-label">{{ item.label }}</span>
+			<span class="status-value"><i class="status-dot state-{{ item.state|lower }}" aria-hidden="true"></i>{{ item.value }}</span>
+			<span class="sr-only">Status: {{ item.state }}</span>
+		</div>
+		{% endfor %}
+	</section>
+
+	{% if message %}<div class="notice" role="status">{{ message }}</div>{% endif %}
+	{% if error %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endif %}
+
+	<section class="result-panel state-border-{{ view.recommendation.state|lower }}" aria-labelledby="current-result">
+		<div class="result-state"><i class="status-dot state-{{ view.recommendation.state|lower }}" aria-hidden="true"></i>{{ view.recommendation.state }}</div>
+		<h1 id="current-result">{{ view.recommendation.headline }}</h1>
+		{% if view.recommendation.reason %}<p class="result-reason">{{ view.recommendation.reason }}</p>{% endif %}
+
+		{% if view.recommendation.historical_quantity is not none %}
+		<p class="historical-result">Last historical result: {{ view.recommendation.historical_quantity }} MES. It is not a current recommendation.</p>
+		{% endif %}
+
+		<dl class="result-grid">
+			<div><dt>Active MES contract</dt><dd>{{ view.recommendation.active_contract }}</dd></div>
+			<div><dt>Strategy amount</dt><dd>{{ view.recommendation.strategy_amount }}</dd></div>
+			<div><dt>MES mark</dt><dd>{{ view.recommendation.mes_mark }}<small class="value-note">{{ view.recommendation.mes_mark_at }}</small></dd></div>
+			<div><dt>Final target</dt><dd>{{ view.recommendation.final_target }}</dd></div>
+			<div><dt>Achieved leverage</dt><dd>{{ view.recommendation.achieved_leverage }}</dd></div>
+			<div><dt>Target notional</dt><dd>{{ view.recommendation.target_notional }}</dd></div>
+			<div><dt>Achieved notional</dt><dd>{{ view.recommendation.achieved_notional }}</dd></div>
+			<div><dt>Effective</dt><dd>{{ view.recommendation.effective_at }}</dd></div>
+		</dl>
+
+		{% if view.recommendation.quantity is not none and view.recommendation.current_quantity is not none %}
+		<dl class="comparison" aria-label="MES quantity comparison">
+			<div><dt>Current</dt><dd>{{ view.recommendation.current_quantity }} MES</dd></div>
+			<div><dt>Target</dt><dd>{{ view.recommendation.quantity }} MES</dd></div>
+			<div><dt>Difference</dt><dd>{{ "%+d"|format(view.recommendation.quantity_difference) }} MES</dd></div>
+		</dl>
+		{% endif %}
+
+		<p class="sizing-warning">NOTIONAL SIZING ONLY — MARGIN NOT CHECKED</p>
+	</section>
+
+	{% if view.pending %}
+	<section class="pending-panel" aria-labelledby="pending-result">
+		<div>
+			<span class="section-label">Indicative estimate</span>
+			<h2 id="pending-result">PENDING NEXT WINDOW: {{ view.pending.quantity }} MES</h2>
+		</div>
+		<dl>
+			<div><dt>Effective</dt><dd>{{ view.pending.effective_at }}</dd></div>
+			<div><dt>Pending target</dt><dd>{{ view.pending.target }}</dd></div>
+		</dl>
+		<p>Uses the current live MES mark. The quantity can change before the execution window.</p>
+		<p class="sizing-warning">NOTIONAL SIZING ONLY — MARGIN NOT CHECKED</p>
+	</section>
+	{% endif %}
+
+	<div class="content-grid">
+		<section class="panel" aria-labelledby="calculation-heading">
+			<div class="panel-heading">
+				<h2 id="calculation-heading">Calculation details</h2>
+				<span>Completed SPY sessions only</span>
+			</div>
+			<div class="table-scroll" tabindex="0" role="region" aria-label="Calculation details table">
+				<table>
+					<thead><tr><th scope="col">Input</th><th scope="col">Value</th></tr></thead>
+					<tbody>
+					{% for metric in view.calculation %}<tr><th scope="row">{{ metric.label }}</th><td>{{ metric.value }}</td></tr>{% endfor %}
+					</tbody>
+				</table>
+			</div>
+		</section>
+
+		<section class="panel event-panel" aria-labelledby="event-heading">
+			<div class="panel-heading">
+				<h2 id="event-heading">Systemic event</h2>
+				<span class="state-text state-{{ view.event.state|lower }}">{{ view.event.state|replace('_', ' ') }}</span>
+			</div>
+			<dl class="event-summary">
+				<div><dt>Type</dt><dd>{{ view.event.event_type }}</dd></div>
+				<div><dt>Window start</dt><dd>{{ view.event.window_start }}</dd></div>
+				<div><dt>Window end</dt><dd>{{ view.event.window_end }}</dd></div>
+				<div><dt>Event drawdown</dt><dd>{{ view.event.drawdown }}</dd></div>
+				<div><dt>Price gate</dt><dd>{{ view.event.price_gate }}</dd></div>
+				<div><dt>Recovery</dt><dd>{{ view.event.recovery }}</dd></div>
+				<div><dt>Detector</dt><dd>{{ view.event.detector }}</dd></div>
+				<div><dt>Verifier</dt><dd>{{ view.event.verifier }}</dd></div>
+			</dl>
+
+			<details {% if view.event.state == 'NEEDS_HUMAN_REVIEW' %}open{% endif %}>
+				<summary>Criterion-level evidence</summary>
+				{% if view.event.criteria %}
+				<ul class="evidence-list">
+					{% for item in view.event.criteria %}
+					<li><div><strong>{{ item.criterion }}</strong><span class="evidence-state state-{{ item.status|lower }}">{{ item.status }}</span></div><p>{{ item.excerpt }}</p></li>
+					{% endfor %}
+				</ul>
+				{% else %}<p class="empty-state">No event evidence has been stored.</p>{% endif %}
+				{% if view.event.missing_evidence %}<p><strong>Missing:</strong> {{ view.event.missing_evidence|join(', ') }}</p>{% endif %}
+				{% if view.event.contradictions %}<p><strong>Contradictions:</strong> {{ view.event.contradictions|join(', ') }}</p>{% endif %}
+			</details>
+
+			<details>
+				<summary>Source documents ({{ view.event.documents|length }})</summary>
+				{% if view.event.documents %}
+				<ul class="document-list">
+				{% for document in view.event.documents %}
+					<li>
+						{% if document.url %}<a href="{{ document.url }}" rel="noopener noreferrer" target="_blank">{{ document.title }}</a>{% else %}<strong>{{ document.title }}</strong>{% endif %}
+						<span>{{ document.publisher }} · {{ document.source_class }} · published {{ document.published_at }} · retrieved {{ document.retrieved_at }}</span>
+					</li>
+				{% endfor %}
+				</ul>
+				{% else %}<p class="empty-state">No source documents have been stored.</p>{% endif %}
+			</details>
+
+			<form class="event-check" action="/api/events/check" method="post">
+				<input type="hidden" name="csrf_token" value="{{ view.csrf_token }}" />
+				<button class="button button-secondary" type="submit">Check sources now</button>
+			</form>
+		</section>
+	</div>
+
+	<section class="panel" aria-labelledby="history-heading">
+		<div class="panel-heading"><h2 id="history-heading">Recent calculations</h2><span>Historical only</span></div>
+		{% if view.history %}
+		<div class="table-scroll" tabindex="0" role="region" aria-label="Recent calculation history table">
+			<table>
+				<thead><tr><th scope="col">Calculated</th><th scope="col">MES</th><th scope="col">Final target</th><th scope="col">Achieved</th><th scope="col">Status at calculation</th></tr></thead>
+				<tbody>{% for item in view.history %}<tr><th scope="row">{{ item.calculated_at }}</th><td>{{ item.quantity }}</td><td>{{ item.target }}</td><td>{{ item.achieved }}</td><td>{{ item.status }}</td></tr>{% endfor %}</tbody>
+			</table>
+		</div>
+		{% else %}<p class="empty-state">No calculations have completed yet.</p>{% endif %}
+	</section>
+
+	<section class="panel settings-panel" aria-labelledby="settings-heading">
+		<div class="panel-heading"><h2 id="settings-heading">Settings</h2><span>Saved server-side</span></div>
+		<form action="/settings" method="post">
+			<input type="hidden" name="csrf_token" value="{{ view.csrf_token }}" />
+			<fieldset>
+				<legend>Sizing</legend>
+				<label>Strategy amount (USD)<input name="strategy_amount_usd" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.strategy_amount }}" required /></label>
+				<label>Current MES quantity <span>(optional, display only)</span><input name="current_mes_quantity" type="number" step="1" inputmode="numeric" value="{{ view.settings.current_mes_quantity }}" /></label>
+			</fieldset>
+			<fieldset>
+				<legend>Interactive Brokers</legend>
+				<label>TWS / Gateway host<input name="ibkr_host" type="text" maxlength="253" value="{{ view.settings.ibkr_host }}" autocomplete="off" required /></label>
+				<label>Port<input name="ibkr_port" type="number" min="1" max="65535" step="1" value="{{ view.settings.ibkr_port }}" required /></label>
+				<label>Client ID<input name="ibkr_client_id" type="number" min="0" step="1" value="{{ view.settings.ibkr_client_id }}" required /></label>
+			</fieldset>
+			<fieldset>
+				<legend>Event verification</legend>
+				<label>OpenAI API key <span>{% if view.settings.openai_key_configured %}Saved — leave blank to keep it{% else %}Not configured{% endif %}</span><input name="openai_api_key" type="password" autocomplete="new-password" /></label>
+				<label>Detector model<input name="detector_model" type="text" maxlength="100" value="{{ view.settings.detector_model }}" required /></label>
+				<label>Verifier model<input name="verifier_model" type="text" maxlength="100" value="{{ view.settings.verifier_model }}" required /></label>
+			</fieldset>
+			<button class="button button-primary" type="submit">Save settings</button>
+		</form>
+	</section>
+
+	<footer>
+		<p>Read-only informational tool. It cannot place, modify, approve, or cancel orders.</p>
+		<p>Times are shown in Europe/Vienna.</p>
+	</footer>
+</main>
+{% endblock %}

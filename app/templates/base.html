@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<title>{% block title %}ARL-5 MES Sizing{% endblock %}</title>
+		<link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}" />
+	</head>
+	<body>
+		<a class="skip-link" href="#main-content">Skip to result</a>
+		{% block body %}{% endblock %}
+	</body>
+</html>

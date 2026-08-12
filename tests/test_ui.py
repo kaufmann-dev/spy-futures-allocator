@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from app.db import (
+    Database,
+    EventDocumentRecord,
+    MesQuoteRecord,
+    RecommendationRecord,
+    Repository,
+    ScheduledTargetRecord,
+    build_dashboard_view,
+)
+
+NOW = datetime(2026, 8, 12, 14, 30, tzinfo=UTC)
+
+
+def _repository(tmp_path: Path) -> Repository:
+    repository = Repository(Database(tmp_path / "app.sqlite3"))
+    repository.initialize()
+    repository.update_settings(strategy_amount_usd=Decimal("100000"), current_mes_quantity=5)
+    return repository
+
+
+def _quote(repository: Repository, *, at: datetime, market_type: int = 1) -> None:
+    repository.append_mes_quote(
+        MesQuoteRecord(
+            con_id=7,
+            bid=Decimal("6999.75"),
+            ask=Decimal("7000.25"),
+            last=Decimal("7000"),
+            mark=Decimal("7000"),
+            market_data_type=market_type,
+            quoted_at=at,
+            received_at=at,
+        )
+    )
+
+
+def _recommendation(
+    repository: Repository,
+    *,
+    status: str = "LIVE",
+    pending: bool = False,
+    target: Decimal = Decimal("3.5"),
+    effective_at: datetime = NOW,
+    quantity: int = 10,
+) -> None:
+    repository.append_recommendation(
+        RecommendationRecord(
+            status=status,
+            calculated_at=NOW,
+            is_pending=pending,
+            quantity=quantity,
+            contract_con_id=7,
+            contract_local_symbol="MESU6",
+            strategy_amount_usd=Decimal("100000"),
+            mes_mark=Decimal("7000"),
+            mes_mark_at=NOW,
+            mes_multiplier=Decimal("5"),
+            scheduled_target=target,
+            event_cap=Decimal("4.85"),
+            final_target=target,
+            contract_notional=Decimal("35000"),
+            target_notional=Decimal("350000"),
+            achieved_notional=Decimal("350000"),
+            achieved_leverage=Decimal("3.5"),
+            target_shortfall=Decimal("0"),
+            target_effective_at=effective_at,
+        )
+    )
+
+
+def _pending_target(repository: Repository, *, target: Decimal, effective_at: datetime) -> None:
+    repository.append_scheduled_target(
+        ScheduledTargetRecord(
+            signal_session_date=effective_at.date() - timedelta(days=1),
+            target=target,
+            effective_at=effective_at,
+            state="PENDING",
+            calculated_at=NOW,
+        )
+    )
+
+
+def test_dashboard_has_exactly_eight_status_cells_and_live_result(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _quote(repository, at=NOW)
+    _recommendation(repository)
+
+    view = build_dashboard_view(repository, now=NOW + timedelta(seconds=20))
+
+    assert len(view.statuses) == 8
+    assert view.recommendation.headline == "HOLD NOW: 10 MES"
+    assert view.recommendation.quantity_difference == 5
+    assert view.recommendation.state == "LIVE"
+    assert view.event.state == "NO_EVENT"
+    assert isinstance(view.as_dict()["recommendation"]["quantity"], int)
+
+
+def test_stale_quote_hides_current_quantity_and_labels_history(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _quote(repository, at=NOW - timedelta(minutes=2))
+    _recommendation(repository)
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.recommendation.state == "STALE"
+    assert view.recommendation.headline == "RECOMMENDATION UNAVAILABLE"
+    assert view.recommendation.quantity is None
+    assert view.recommendation.historical_quantity == 10
+
+
+def test_delayed_market_data_fails_closed(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _quote(repository, at=NOW, market_type=3)
+    _recommendation(repository)
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.recommendation.state == "UNAVAILABLE"
+    assert view.statuses[2].state == "NOT_ENTITLED"
+    assert view.statuses[3].value == "Delayed"
+
+
+def test_matching_future_pending_recommendation_is_displayed(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    effective_at = NOW + timedelta(hours=1)
+    _quote(repository, at=NOW)
+    _recommendation(repository)
+    _pending_target(repository, target=Decimal("2.5"), effective_at=effective_at)
+    _recommendation(
+        repository,
+        pending=True,
+        target=Decimal("2.5"),
+        effective_at=effective_at,
+        quantity=7,
+    )
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.pending is not None
+    assert view.pending.quantity == 7
+    assert view.pending.target == "2.50×"
+
+
+def test_expired_pending_recommendation_is_not_displayed(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    effective_at = NOW + timedelta(hours=1)
+    _recommendation(repository)
+    _pending_target(repository, target=Decimal("2.5"), effective_at=effective_at)
+    _recommendation(
+        repository,
+        pending=True,
+        target=Decimal("2.5"),
+        effective_at=effective_at,
+        quantity=7,
+    )
+    after_effective_at = effective_at + timedelta(seconds=1)
+    _quote(repository, at=after_effective_at)
+
+    view = build_dashboard_view(repository, now=after_effective_at)
+
+    assert view.pending is None
+
+
+def test_pending_recommendation_must_match_current_future_target(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    effective_at = NOW + timedelta(hours=1)
+    _quote(repository, at=NOW)
+    _recommendation(repository)
+    _pending_target(repository, target=Decimal("2.5"), effective_at=effective_at)
+    _recommendation(
+        repository,
+        pending=True,
+        target=Decimal("3.0"),
+        effective_at=effective_at,
+        quantity=8,
+    )
+
+    view = build_dashboard_view(repository, now=NOW)
+
+    assert view.pending is None
+
+
+def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _quote(repository, at=NOW)
+    _recommendation(repository)
+    repository.append_event_document(
+        EventDocumentRecord(
+            event_case_id=None,
+            model_run_id=None,
+            url="javascript:alert(1)",
+            title="<script>alert(1)</script>",
+            publisher="Unsafe",
+            source_class="OTHER",
+            published_at=None,
+            retrieved_at=NOW,
+            content_hash="abc",
+        )
+    )
+    view = build_dashboard_view(repository, now=NOW)
+    templates = Path(__file__).parents[1] / "app" / "templates"
+    environment = Environment(
+        loader=FileSystemLoader(templates),
+        autoescape=select_autoescape(["html"]),
+    )
+    environment.globals["url_for"] = lambda name, **kwargs: f"/static/{kwargs['path'].lstrip('/')}"
+
+    html = environment.get_template("dashboard.html").render(view=view)
+
+    assert "HOLD NOW: 10 MES" in html
+    assert "NOTIONAL SIZING ONLY — MARGIN NOT CHECKED" in html
+    assert "It cannot place, modify, approve, or cancel orders." in html
+    assert html.count('class="status-cell"') == 8
