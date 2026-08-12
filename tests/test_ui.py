@@ -581,23 +581,25 @@ def test_dashboard_template_escapes_data_and_has_required_disclosures(tmp_path: 
     assert "NOTIONAL SIZING ONLY — MARGIN NOT CHECKED" in html
     assert "It cannot place, modify, approve, or cancel orders." in html
     assert html.count('class="status-cell"') == 8
-    assert "Historical strategy replay" in html
-    assert "252 completed sessions" in html
+    assert "Strategy history" in html
+    assert "252 sessions" in html
     assert html.count('class="chart-band"') == 1
     assert html.count("<svg") == 1
-    assert html.count("<polyline") == 2
+    assert html.count("<polyline") == 3
     assert html.count('role="img"') == 1
     assert 'aria-labelledby="strategy-performance-title strategy-performance-description"' in html
-    assert "ARL-5 proxy · solid" in html
-    assert "SPY price · dashed" in html
-    assert "not MES execution performance or a tradable backtest" in html
-    assert "futures basis and rolls" in html
-    assert "Drawdowns are completed-close only" in html
-    assert html.count('name="chart_view"') == 5
+    assert "ARL-5" in html
+    assert "SPY" in html
+    assert "Fractional exposure; not MES performance" in html
+    assert html.count('name="chart_view"') == 6
     assert html.count('aria-current="true"') == 1
+    assert html.count(" selected") == 1
+    assert 'class="chart-view-select"' in html
+    assert 'class="chart-view-buttons"' in html
     assert "<script" not in html
     assert "onchange=" not in html
     assert 'class="chart-line chart-line-effective"' in html
+    assert 'class="chart-line chart-line-secondary-halo"' in html
 
 
 def test_dashboard_renders_exactly_one_accessible_chart_for_each_view(tmp_path: Path) -> None:

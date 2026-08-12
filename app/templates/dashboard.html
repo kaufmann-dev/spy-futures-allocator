@@ -73,17 +73,28 @@
 
 	<section class="panel strategy-chart-panel" aria-labelledby="strategy-chart-heading">
 		<div class="panel-heading">
-			<h2 id="strategy-chart-heading">Historical strategy replay</h2>
-			<span>{% if view.strategy_chart.available %}{{ view.strategy_chart.session_count }} completed sessions{% else %}Completed sessions only{% endif %}</span>
+			<h2 id="strategy-chart-heading">Strategy history</h2>
+			<span>{% if view.strategy_chart.available %}{{ view.strategy_chart.session_count }} sessions{% else %}Completed sessions only{% endif %}</span>
 		</div>
 		{% if view.strategy_chart.available %}
 		<nav class="chart-view-switcher" aria-label="Chart view">
-			<form method="get" action="/#strategy-chart-heading">
+			<form class="chart-view-buttons" method="get" action="/#strategy-chart-heading">
 				<button type="submit" name="chart_view" value="performance" aria-label="Historical performance"{% if chart_view == 'performance' %} aria-current="true"{% endif %}>Return</button>
 				<button type="submit" name="chart_view" value="drawdowns" aria-label="Historical drawdowns"{% if chart_view == 'drawdowns' %} aria-current="true"{% endif %}>Drawdown</button>
 				<button type="submit" name="chart_view" value="exposure" aria-label="Historical exposure"{% if chart_view == 'exposure' %} aria-current="true"{% endif %}>Exposure</button>
 				<button type="submit" name="chart_view" value="trend" aria-label="SPY and SMA200 trend"{% if chart_view == 'trend' %} aria-current="true"{% endif %}>Trend</button>
 				<button type="submit" name="chart_view" value="risk" aria-label="RV20 and DD20 risk"{% if chart_view == 'risk' %} aria-current="true"{% endif %}>Risk</button>
+			</form>
+			<form class="chart-view-select" method="get" action="/#strategy-chart-heading">
+				<label for="chart-view">Chart</label>
+				<select id="chart-view" name="chart_view">
+					<option value="performance"{% if chart_view == 'performance' %} selected{% endif %}>Return vs SPY</option>
+					<option value="drawdowns"{% if chart_view == 'drawdowns' %} selected{% endif %}>Drawdowns</option>
+					<option value="exposure"{% if chart_view == 'exposure' %} selected{% endif %}>Exposure</option>
+					<option value="trend"{% if chart_view == 'trend' %} selected{% endif %}>SPY / SMA200</option>
+					<option value="risk"{% if chart_view == 'risk' %} selected{% endif %}>RV20 / DD20</option>
+				</select>
+				<button type="submit">Show</button>
 			</form>
 		</nav>
 		<figure class="strategy-chart">
@@ -93,8 +104,8 @@
 					<h3 id="performance-band-heading">Growth of $100</h3>
 					{% if view.strategy_chart.performance_available %}
 					<ul class="chart-band-values" aria-label="Historical total returns">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5 proxy · solid</span><strong>{{ view.strategy_chart.latest_strategy_value }} · {{ view.strategy_chart.strategy_total_return }}</strong></li>
-						<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY price · dashed</span><strong>{{ view.strategy_chart.latest_spy_value }} · {{ view.strategy_chart.spy_total_return }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5</span><strong>{{ view.strategy_chart.latest_strategy_value }} · {{ view.strategy_chart.strategy_total_return }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-spy" aria-hidden="true"></i><span>SPY</span><strong>{{ view.strategy_chart.latest_spy_value }} · {{ view.strategy_chart.spy_total_return }}</strong></li>
 					</ul>
 					{% endif %}
 				</div>
@@ -107,6 +118,7 @@
 							<desc id="strategy-performance-description">Normalized growth of 100 dollars. The solid line is the leveraged ARL-5 SPY-return proxy and the dashed line is SPY price return.</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
 							<polyline class="chart-line chart-line-effective" points="{{ view.strategy_chart.performance_strategy_points }}" />
+							<polyline class="chart-line chart-line-secondary-halo" points="{{ view.strategy_chart.performance_spy_points }}" />
 							<polyline class="chart-line chart-line-spy-benchmark" points="{{ view.strategy_chart.performance_spy_points }}" />
 						</svg>
 					</div>
@@ -119,8 +131,8 @@
 					<h3 id="drawdown-band-heading">Close-to-close drawdown</h3>
 					{% if view.strategy_chart.performance_available %}
 					<ul class="chart-band-values" aria-label="Maximum historical drawdowns">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5 proxy · solid</span><strong>Max {{ view.strategy_chart.strategy_max_drawdown }}</strong></li>
-						<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY price · dashed</span><strong>Max {{ view.strategy_chart.spy_max_drawdown }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5</span><strong>Max {{ view.strategy_chart.strategy_max_drawdown }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-spy" aria-hidden="true"></i><span>SPY</span><strong>Max {{ view.strategy_chart.spy_max_drawdown }}</strong></li>
 					</ul>
 					{% endif %}
 				</div>
@@ -133,6 +145,7 @@
 							<desc id="strategy-drawdown-description">Completed-close drawdown from each series' prior peak. The solid line is the ARL-5 proxy and the dashed line is SPY.</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
 							<polyline class="chart-line chart-line-effective" points="{{ view.strategy_chart.drawdown_strategy_points }}" />
+							<polyline class="chart-line chart-line-secondary-halo" points="{{ view.strategy_chart.drawdown_spy_points }}" />
 							<polyline class="chart-line chart-line-spy-benchmark" points="{{ view.strategy_chart.drawdown_spy_points }}" />
 						</svg>
 					</div>
@@ -144,8 +157,8 @@
 				<div class="chart-band-heading">
 					<h3 id="exposure-band-heading">Regular-session exposure</h3>
 					<ul class="chart-band-values" aria-label="Historical exposure summary">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>Effective target · stepped</span><strong>{{ view.strategy_chart.latest_open_exposure }}</strong></li>
-						<li><span>Invested sessions</span><strong>{{ view.strategy_chart.exposure_invested_percent }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>Now</span><strong>{{ view.strategy_chart.latest_open_exposure }}</strong></li>
+						<li><span>Invested</span><strong>{{ view.strategy_chart.exposure_invested_percent }}</strong></li>
 						<li><span>At 0×</span><strong>{{ view.strategy_chart.exposure_zero_sessions }} sessions</strong></li>
 					</ul>
 				</div>
@@ -198,7 +211,6 @@
 						<li><i class="chart-swatch chart-swatch-dd20" aria-hidden="true"></i><span>DD20 · dashed</span><strong>{{ view.strategy_chart.latest_dd20 }}</strong></li>
 					</ul>
 				</div>
-				<p class="chart-references">RV20 volatility floor/full bonus: 8% · RV20 zero bonus: 20% · DD20 bonus gate: −1%{% if view.strategy_chart.event_lock_reference_visible %} · Qualified-event lock gate: −4%{% endif %}</p>
 				<div class="chart-band-grid">
 					<div class="chart-y-axis" aria-hidden="true">
 						<span>{{ view.strategy_chart.risk_high_label }}</span>
@@ -226,8 +238,7 @@
 
 			<div class="chart-shared-x-axis" aria-hidden="true"><span></span><div><span>{{ view.strategy_chart.start_date }}</span><span>{{ view.strategy_chart.end_date }}</span></div></div>
 			<figcaption>
-				{% if chart_view == 'performance' or chart_view == 'drawdowns' %}SPY price-return rule replay, not MES execution performance or a tradable backtest. Both series are rebased to $100 at the first displayed completed close. It assumes fractional exposure at exact open and close prices and uses the latest revised persisted data. It excludes dividends, cash yield, futures basis and rolls, financing, fees, slippage, taxes, margin, and liquidation effects. Drawdowns are completed-close only. Historical event transitions can be detected and backfilled later; the chart applies their rules to the qualifying sessions.{% elif chart_view == 'exposure' %}The line shows exposure effective at each regular-session open. A qualified event lock takes effect after its triggering close, while recovery restores exposure only at its valid Tuesday or Friday open.{% elif chart_view == 'trend' %}{{ view.strategy_chart.price_relationship }} SPY and SMA200 use completed regular-session calculations.{% else %}RV20 and DD20 use completed regular-session calculations. The −4% gate applies only during a confirmed event window.{% endif %}
-				The displayed range is {{ view.strategy_chart.start_date }} through {{ view.strategy_chart.end_date }}.
+				{% if chart_view == 'performance' %}SPY-bar rule replay, rebased to $100. Fractional exposure; not MES performance.{% elif chart_view == 'drawdowns' %}Completed-close drawdowns for ARL-5 and SPY. Revised data can change history.{% elif chart_view == 'exposure' %}Target at each open. Locks start after the trigger close; recovery at a valid Tue/Fri open.{% elif chart_view == 'trend' %}{{ view.strategy_chart.price_relationship }} Completed sessions only.{% else %}RV20 / DD20 with 8%, 20%, and −1% thresholds; −4% only in a confirmed event window.{% endif %}
 			</figcaption>
 		</figure>
 		{% else %}
