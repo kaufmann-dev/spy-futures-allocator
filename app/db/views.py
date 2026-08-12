@@ -185,6 +185,7 @@ class OperationalOverrides:
 def _recommendation_state(
     recommendation: RecommendationRecord | None,
     *,
+    ibkr_connection: str | None,
     quote_received_at: datetime | None,
     market_data_type: int | None,
     now: datetime,
@@ -193,6 +194,8 @@ def _recommendation_state(
     if recommendation is None or recommendation.status == "UNAVAILABLE":
         return "UNAVAILABLE"
     if recommendation.status == "STALE":
+        return "STALE"
+    if ibkr_connection is not None and ibkr_connection.upper() != "LIVE":
         return "STALE"
     if market_data_type != 1:
         return "UNAVAILABLE"
@@ -269,6 +272,7 @@ def build_dashboard_view(
 
     recommendation_state = _recommendation_state(
         recommendation,
+        ibkr_connection=operational.ibkr_connection,
         quote_received_at=quote.received_at if quote else None,
         market_data_type=quote.market_data_type if quote else None,
         now=now,

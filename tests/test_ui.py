@@ -10,6 +10,7 @@ from app.db import (
     Database,
     EventDocumentRecord,
     MesQuoteRecord,
+    OperationalOverrides,
     RecommendationRecord,
     Repository,
     ScheduledTargetRecord,
@@ -113,6 +114,24 @@ def test_stale_quote_hides_current_quantity_and_labels_history(tmp_path: Path) -
     assert view.recommendation.headline == "RECOMMENDATION UNAVAILABLE"
     assert view.recommendation.quantity is None
     assert view.recommendation.historical_quantity == 10
+
+
+def test_disconnected_ibkr_overrides_fresh_cached_quote(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _quote(repository, at=NOW)
+    _recommendation(repository)
+
+    view = build_dashboard_view(
+        repository,
+        now=NOW,
+        operational=OperationalOverrides(ibkr_connection="UNAVAILABLE"),
+    )
+
+    assert view.recommendation.state == "STALE"
+    assert view.recommendation.headline == "RECOMMENDATION UNAVAILABLE"
+    assert view.recommendation.quantity is None
+    assert view.recommendation.historical_quantity == 10
+    assert view.statuses[0].state == "UNAVAILABLE"
 
 
 def test_delayed_market_data_fails_closed(tmp_path: Path) -> None:

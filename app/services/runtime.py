@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse
@@ -43,7 +44,12 @@ from app.domain import (
     update_event_after_close,
 )
 from app.domain.errors import DomainError
-from app.integrations.ibkr import IbkrMarketData, IbkrUnavailable, ResolvedContract
+from app.integrations.ibkr import (
+    IbkrMarketData,
+    IbkrUnavailable,
+    ResolvedContract,
+    active_mes_expiry,
+)
 from app.integrations.openai_events import EventCheckResult, ModelRun, OpenAIEventMonitor
 from app.security import SecretBox
 
@@ -52,6 +58,12 @@ logger = logging.getLogger(__name__)
 OPENAI_KEY_PURPOSE = "arl5-simplified:openai-api-key"
 QUOTE_MAX_AGE = timedelta(seconds=60)
 NEW_YORK = ZoneInfo("America/New_York")
+ACTIVATED_EVENT_STATES = {
+    "WINDOW_ACTIVE",
+    "EVENT_LOCKED",
+    "RECOVERY_TRACKING",
+    "RECOVERY_CONFIRMED",
+}
 
 
 class RuntimeUnavailable(RuntimeError):
@@ -64,6 +76,8 @@ class ApplicationRuntime:
         repository: Repository,
         auth_store: SqliteAuthStore,
         secret_box: SecretBox,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.auth_store = auth_store
@@ -73,6 +87,13 @@ class ApplicationRuntime:
         self._ibkr_key: tuple[str, int, int] | None = None
         self._lock = threading.RLock()
         self._last_spy_fetch: datetime | None = None
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise RuntimeUnavailable("runtime clock must include a timezone")
+        return value.astimezone(UTC)
 
     @property
     def ibkr_state(self) -> str:
@@ -83,7 +104,6 @@ class ApplicationRuntime:
             self.refresh_market_data()
         finally:
             self.recalculate()
-            self.update_event_overlay()
 
     def reset_ibkr(self) -> None:
         with self._lock:
@@ -105,12 +125,50 @@ class ApplicationRuntime:
     def maintain_ibkr(self) -> None:
         with self._lock:
             client = self._client()
+            now = self._now()
+            trading_date = now.astimezone(NEW_YORK).date()
+            stored_contract = self.repository.latest_contract()
+            was_connected = client.connected
             if not client.connected:
                 client.connect()
-                resolved = client.resolve_active_mes()
+
+            stored_is_active = self._contract_is_active(stored_contract, at=now)
+            if was_connected and stored_contract is not None and not stored_is_active:
+                # Cancel the old market-data subscription before reusing IBKR's
+                # fixed ticker id for the new quarterly contract.
+                client.disconnect()
+                client.connect()
+
+            if not was_connected or not stored_is_active:
+                resolved = client.resolve_active_mes(on_date=trading_date)
+                if not self._resolved_contract_is_active(resolved, at=now):
+                    raise IbkrUnavailable("IBKR did not resolve the active MES contract")
                 self._persist_contract(resolved)
                 client.subscribe_mes(resolved)
-                self._audit("IBKR_CONNECTED", {"contract": resolved.local_symbol})
+                action = "IBKR_CONNECTED" if not was_connected else "MES_CONTRACT_ROLLED"
+                self._audit(action, {"contract": resolved.local_symbol})
+
+    @staticmethod
+    def _expiry_matches_active(expiry: str, *, at: datetime) -> bool:
+        expected = active_mes_expiry(at.astimezone(NEW_YORK).date())
+        return len(expiry) >= 6 and expiry[:6].isdigit() and expiry[:6] == expected
+
+    @classmethod
+    def _contract_is_active(cls, contract: ContractRecord | None, *, at: datetime) -> bool:
+        return bool(
+            contract is not None
+            and contract.symbol == "MES"
+            and contract.multiplier == Decimal("5")
+            and cls._expiry_matches_active(contract.last_trade_date, at=at)
+        )
+
+    @classmethod
+    def _resolved_contract_is_active(cls, contract: ResolvedContract, *, at: datetime) -> bool:
+        return bool(
+            contract.symbol == "MES"
+            and contract.multiplier == Decimal("5")
+            and cls._expiry_matches_active(contract.expiry, at=at)
+        )
 
     def _persist_contract(self, contract: ResolvedContract) -> None:
         self.repository.append_contract(
@@ -123,7 +181,7 @@ class ApplicationRuntime:
                 currency=contract.currency,
                 last_trade_date=contract.expiry,
                 multiplier=contract.multiplier,
-                resolved_at=datetime.now(UTC),
+                resolved_at=self._now(),
             )
         )
 
@@ -131,7 +189,7 @@ class ApplicationRuntime:
         with self._lock:
             self.maintain_ibkr()
             client = self._client()
-            now = datetime.now(UTC)
+            now = self._now()
             try:
                 quote = client.current_mes_quote()
             except IbkrUnavailable:
@@ -202,36 +260,59 @@ class ApplicationRuntime:
 
     def current_schedule(self, *, as_of: datetime | None = None) -> ScheduleState:
         return reconstruct_schedule(
-            self._raw_snapshots(), as_of=as_of or datetime.now(UTC), calendar=self.calendar
+            self._raw_snapshots(), as_of=as_of or self._now(), calendar=self.calendar
         )
 
-    def _calculate_latest_signal(self, now: datetime) -> SignalSnapshotRecord:
+    @staticmethod
+    def _signal_values(snapshot: SignalSnapshotRecord) -> tuple[Decimal, ...]:
+        return (
+            snapshot.spy_close,
+            snapshot.sma200,
+            snapshot.distance_above_sma200,
+            snapshot.daily_return,
+            snapshot.rv20,
+            snapshot.prior_20_session_high,
+            snapshot.dd20,
+            snapshot.base,
+            snapshot.bonus,
+            snapshot.volatility_cap,
+            snapshot.raw_target,
+            snapshot.shadow_raw_target,
+        )
+
+    def _backfill_signal_snapshots(self, now: datetime) -> list[SignalSnapshotRecord]:
         bars = self.repository.latest_spy_bars(1000)
         daily = [DailyBar(item.session_date, item.close, completed=True) for item in bars]
-        result = calculate_leverage(daily)
-        latest_bar = bars[-1]
-        existing = self.repository.signal_snapshots_for_session(latest_bar.session_date)
-        if existing:
-            current = existing[0]
-            if current.spy_close == latest_bar.close:
-                return current
-        snapshot = SignalSnapshotRecord(
-            session_date=latest_bar.session_date,
-            spy_close=result.metrics.spy_close,
-            sma200=result.metrics.sma200,
-            distance_above_sma200=result.metrics.distance_above_sma200,
-            daily_return=result.metrics.daily_return,
-            rv20=result.metrics.rv20,
-            prior_20_session_high=result.metrics.prior_20_session_high,
-            dd20=result.metrics.dd20,
-            base=result.base,
-            bonus=result.bonus,
-            volatility_cap=result.volatility_cap,
-            raw_target=result.raw_target,
-            shadow_raw_target=result.raw_target,
-            calculated_at=max(now, latest_bar.completed_at),
-        )
-        return self.repository.append_signal_snapshot(snapshot)
+        if len(daily) < 200:
+            # Keep the domain's precise fail-closed reason.
+            calculate_leverage(daily)
+
+        saved: list[SignalSnapshotRecord] = []
+        for index in range(199, len(bars)):
+            result = calculate_leverage(daily[: index + 1])
+            bar = bars[index]
+            snapshot = SignalSnapshotRecord(
+                session_date=bar.session_date,
+                spy_close=result.metrics.spy_close,
+                sma200=result.metrics.sma200,
+                distance_above_sma200=result.metrics.distance_above_sma200,
+                daily_return=result.metrics.daily_return,
+                rv20=result.metrics.rv20,
+                prior_20_session_high=result.metrics.prior_20_session_high,
+                dd20=result.metrics.dd20,
+                base=result.base,
+                bonus=result.bonus,
+                volatility_cap=result.volatility_cap,
+                raw_target=result.raw_target,
+                shadow_raw_target=result.raw_target,
+                calculated_at=max(now, bar.completed_at),
+            )
+            existing = self.repository.signal_snapshots_for_session(bar.session_date)
+            if existing and self._signal_values(existing[0]) == self._signal_values(snapshot):
+                saved.append(existing[0])
+                continue
+            saved.append(self.repository.append_signal_snapshot(snapshot))
+        return saved
 
     def _persist_schedule(self, schedule: object, now: datetime) -> None:
         for target, effective_at, state in (
@@ -269,38 +350,40 @@ class ApplicationRuntime:
 
     def recalculate(self) -> None:
         with self._lock:
-            now = datetime.now(UTC)
+            now = self._now()
             try:
-                self._calculate_latest_signal(now)
-                schedule = reconstruct_schedule(
-                    self._raw_snapshots(), as_of=now, calendar=self.calendar
-                )
-                self._persist_schedule(schedule, now)
-                self._release_recovery_if_due(now)
-                state_record = self.repository.latest_event_state()
-                state = EventState(state_record.state) if state_record else EventState.NO_EVENT
-                final_target = apply_event_cap(schedule.current_scheduled_target, state)
-                self._persist_recommendation(
-                    now=now,
-                    target=schedule.current_scheduled_target,
-                    final_target=final_target,
-                    effective_at=schedule.current_target_effective_at,
-                    pending=False,
-                )
-                if (
-                    schedule.pending_scheduled_target is not None
-                    and schedule.pending_target_effective_at is not None
-                ):
-                    pending_final = apply_event_cap(schedule.pending_scheduled_target, state)
-                    self._persist_recommendation(
-                        now=now,
-                        target=schedule.pending_scheduled_target,
-                        final_target=pending_final,
-                        effective_at=schedule.pending_target_effective_at,
-                        pending=True,
-                    )
+                self._recalculate_locked(now, update_overlay=True)
             except (DomainError, RuntimeUnavailable, IbkrUnavailable, ValueError) as exc:
                 self._persist_unavailable(str(exc), now=now)
+
+    def _recalculate_locked(self, now: datetime, *, update_overlay: bool) -> None:
+        self._backfill_signal_snapshots(now)
+        schedule = reconstruct_schedule(self._raw_snapshots(), as_of=now, calendar=self.calendar)
+        self._persist_schedule(schedule, now)
+        if update_overlay:
+            self._update_event_overlay_locked(now)
+        state_record = self.repository.latest_event_state()
+        state = EventState(state_record.state) if state_record else EventState.NO_EVENT
+        final_target = apply_event_cap(schedule.current_scheduled_target, state)
+        self._persist_recommendation(
+            now=now,
+            target=schedule.current_scheduled_target,
+            final_target=final_target,
+            effective_at=schedule.current_target_effective_at,
+            pending=False,
+        )
+        if (
+            schedule.pending_scheduled_target is not None
+            and schedule.pending_target_effective_at is not None
+        ):
+            pending_final = apply_event_cap(schedule.pending_scheduled_target, state)
+            self._persist_recommendation(
+                now=now,
+                target=schedule.pending_scheduled_target,
+                final_target=pending_final,
+                effective_at=schedule.pending_target_effective_at,
+                pending=True,
+            )
 
     def _persist_recommendation(
         self,
@@ -318,12 +401,16 @@ class ApplicationRuntime:
         contract = self.repository.latest_contract()
         if quote is None or contract is None or quote.con_id != contract.con_id:
             raise RuntimeUnavailable("live MES contract and quote are unavailable")
+        if not self._contract_is_active(contract, at=now):
+            raise RuntimeUnavailable("the stored contract is not the active MES contract")
         if quote.market_data_type != 1:
             raise RuntimeUnavailable("MES market data is not live")
         if quote.mark is None or quote.quoted_at is None:
             raise RuntimeUnavailable("MES mark is unavailable")
         if now - quote.received_at > QUOTE_MAX_AGE or now - quote.quoted_at > QUOTE_MAX_AGE:
             raise RuntimeUnavailable("MES quote is stale")
+        if self._ibkr is None or not self._ibkr.connected:
+            raise RuntimeUnavailable("IBKR is disconnected")
         sizing = size_mes(
             strategy_amount_usd=settings.strategy_amount_usd,
             final_target=final_target,
@@ -430,49 +517,77 @@ class ApplicationRuntime:
             )
         )
 
-    def _release_recovery_if_due(self, now: datetime) -> None:
+    def _release_recovery_if_due(self, now: datetime) -> bool:
         state = self.repository.latest_event_state()
         if state is None or state.event_case_id is None or state.state != "RECOVERY_CONFIRMED":
-            return
+            return False
         case = self.repository.event_case(state.event_case_id)
         if case is None:
             raise RuntimeUnavailable("event state references a missing case")
         released = release_confirmed_recovery(self._overlay(state, case), at=now)
         if released.state != EventState(state.state):
             self._persist_overlay(released, state.event_case_id, now)
+            return True
+        return False
 
     def update_event_overlay(self) -> None:
         with self._lock:
-            now = datetime.now(UTC)
-            state = self.repository.latest_event_state()
-            if state is None or state.event_case_id is None:
-                return
-            if state.state not in {
-                "WINDOW_ACTIVE",
-                "EVENT_LOCKED",
-                "RECOVERY_TRACKING",
-                "RECOVERY_CONFIRMED",
-            }:
-                return
-            case = self.repository.event_case(state.event_case_id)
-            if case is None:
-                raise RuntimeUnavailable("event state references a missing case")
-            bars = self.repository.latest_spy_bars(1000)
-            latest = bars[-1]
-            if state.last_evaluated_session == latest.session_date:
-                self._release_recovery_if_due(now)
-                return
-            closes = [bar.close for bar in bars]
-            if len(closes) < 21:
-                raise RuntimeUnavailable("event drawdown requires 21 completed SPY closes")
+            now = self._now()
+            try:
+                changed = self._update_event_overlay_locked(now)
+                if changed:
+                    # Publish a new recommendation in the same critical section
+                    # so an event lock cannot leave a newer nonzero LIVE result.
+                    self._recalculate_locked(now, update_overlay=False)
+            except (DomainError, RuntimeUnavailable, IbkrUnavailable, ValueError) as exc:
+                self._persist_unavailable(str(exc), now=now)
+
+    def _update_event_overlay_locked(self, now: datetime) -> bool:
+        state = self.repository.latest_event_state()
+        if state is None or state.event_case_id is None:
+            return False
+        if state.state not in ACTIVATED_EVENT_STATES:
+            return False
+        case = self.repository.event_case(state.event_case_id)
+        if case is None:
+            raise RuntimeUnavailable("event state references a missing case")
+
+        bars = self.repository.latest_spy_bars(1000)
+        overlay = self._overlay(state, case)
+        changed = False
+        for index, item in enumerate(bars):
+            if item.completed_at < case.window_start:
+                continue
+            if (
+                overlay.last_evaluated_session is not None
+                and item.session_date <= overlay.last_evaluated_session
+            ):
+                continue
+            if index < 20:
+                raise RuntimeUnavailable("event drawdown requires 20 prior SPY closes")
             updated = update_event_after_close(
-                self._overlay(state, case),
-                bar=DailyBar(latest.session_date, latest.close),
-                prior_20_session_high=max(closes[-21:-1]),
-                completed_at=latest.completed_at,
+                overlay,
+                bar=DailyBar(item.session_date, item.close),
+                prior_20_session_high=max(bar.close for bar in bars[index - 20 : index]),
+                completed_at=item.completed_at,
                 calendar=self.calendar,
             )
+            if event_cap(updated.state) < event_cap(overlay.state):
+                # Write a fail-closed barrier before publishing the lock. A
+                # concurrent reader can therefore never observe EVENT_LOCKED
+                # while the newest recommendation is still a nonzero LIVE one.
+                self._persist_unavailable("systemic event lock is being applied", now=now)
             self._persist_overlay(updated, state.event_case_id, now)
+            overlay = updated
+            changed = True
+            if overlay.state not in {
+                EventState.WINDOW_ACTIVE,
+                EventState.EVENT_LOCKED,
+                EventState.RECOVERY_TRACKING,
+                EventState.RECOVERY_CONFIRMED,
+            }:
+                break
+        return self._release_recovery_if_due(now) or changed
 
     def _api_key(self, settings: AppSettings) -> str:
         encrypted = settings.openai_api_key_ciphertext
@@ -489,6 +604,8 @@ class ApplicationRuntime:
             )
             detector = monitor.detect()
             previous = self.repository.latest_event_model_run("DETECTOR")
+            current = self.repository.latest_event_state()
+            review_pending = current is not None and current.state == "NEEDS_HUMAN_REVIEW"
             if previous is not None and previous.structured_output_json:
                 try:
                     previous_payload = json.loads(previous.structured_output_json)
@@ -497,6 +614,7 @@ class ApplicationRuntime:
                 if (
                     isinstance(previous_payload, dict)
                     and previous_payload.get("evidence_hash") == detector.response_hash
+                    and not review_pending
                 ):
                     self._audit("EVENT_EVIDENCE_UNCHANGED", {"detector": detector.model})
                     return
@@ -507,9 +625,10 @@ class ApplicationRuntime:
                 verifier = monitor.verify(detector)
                 result = monitor.classify_pair(detector, verifier)
             self._persist_event_check(result)
+            self.recalculate()
 
     def _persist_event_check(self, result: EventCheckResult) -> None:
-        now = datetime.now(UTC)
+        now = self._now()
         current = self.repository.latest_event_state()
         case: EventCaseRecord | None = None
         if (
@@ -533,14 +652,13 @@ class ApplicationRuntime:
         if result.verifier is not None:
             self._persist_model_run(result.verifier, case)
 
-        existing_active = current is not None and current.state in {
-            "WINDOW_ACTIVE",
-            "EVENT_LOCKED",
-            "RECOVERY_TRACKING",
-            "RECOVERY_CONFIRMED",
-        }
+        existing_active = current is not None and current.state in ACTIVATED_EVENT_STATES
         if result.state == "WINDOW_ACTIVE" and case is not None and case.id is not None:
-            if existing_active or self.repository.event_state_history(case.id):
+            previously_activated = any(
+                item.state in ACTIVATED_EVENT_STATES
+                for item in self.repository.event_state_history(case.id)
+            )
+            if existing_active or previously_activated:
                 self._audit("EVENT_DUPLICATE_IGNORED", {"event_key": result.event_key})
                 return
             self.repository.append_event_state(
@@ -630,7 +748,7 @@ class ApplicationRuntime:
             )
 
     def prune_auth(self) -> None:
-        self.auth_store.prune(int(datetime.now(UTC).timestamp()) - 7 * 24 * 60 * 60)
+        self.auth_store.prune(int(self._now().timestamp()) - 7 * 24 * 60 * 60)
 
     def save_settings(
         self,
@@ -681,6 +799,6 @@ class ApplicationRuntime:
             AuditEntry(
                 action=action,
                 detail_json=json.dumps(detail, sort_keys=True, separators=(",", ":")),
-                occurred_at=datetime.now(UTC),
+                occurred_at=self._now(),
             )
         )

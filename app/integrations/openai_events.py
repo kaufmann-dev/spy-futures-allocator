@@ -11,6 +11,13 @@ from urllib.parse import urlparse
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.event_references import (
+    G20_SOVEREIGN_MEMBERS,
+    NUCLEAR_ARMED_STATES,
+    UN_MEMBER_STATES,
+    normalize_iso_country_code,
+)
+
 ALLOWED_DOMAINS = (
     "who.int",
     "un.org",
@@ -74,6 +81,16 @@ class EventAssessment(BaseModel):
     event_type: EventType
     event_key: str = Field(max_length=200)
     original_qualifying_timestamp: datetime | None
+    attacker_country_code: str | None = Field(
+        default=None,
+        description="ISO 3166-1 alpha-2 or alpha-3 attacker code; null for non-war events.",
+        max_length=16,
+    )
+    target_country_code: str | None = Field(
+        default=None,
+        description="ISO 3166-1 alpha-2 or alpha-3 target code; null for non-war events.",
+        max_length=16,
+    )
     summary: str = Field(max_length=2_000)
     criteria: list[CriterionEvidence] = Field(default_factory=list, max_length=12)
     contradictions: list[str] = Field(default_factory=list, max_length=12)
@@ -84,6 +101,11 @@ class EventAssessment(BaseModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("event timestamp must include a timezone")
         return value
+
+    @field_validator("attacker_country_code", "target_country_code")
+    @classmethod
+    def normalize_country_code_case(cls, value: str | None) -> str | None:
+        return value.strip().upper() if value is not None else None
 
 
 class RetrievedSource(BaseModel):
@@ -146,6 +168,11 @@ MAJOR_INTERSTATE_WAR requires all exact criterion keys:
 UN_CROSS_BORDER_OPERATION, ATTACKER_SOVEREIGN_STATE, ATTACKER_G20_OR_NUCLEAR,
 TARGET_UN_MEMBER_STATE, TWO_INDEPENDENT_CORROBORATORS.
 
+For a war, emit attacker_country_code and target_country_code as ISO 3166-1 alpha-2 or alpha-3
+codes. The deterministic gate uses pinned reference snapshots
+G20_SOVEREIGN_MEMBERS_2025 / SIPRI_NUCLEAR_ARMED_STATES_2026 and
+UN_MEMBERS_193_2026-03-29. Set both country fields to null for PANDEMIC or NONE.
+
 For each criterion, cite URLs that explicitly support it. A WHO source must support the WHO
 criteria. A UN source must support UN_CROSS_BORDER_OPERATION. War corroboration must comprise at
 least two independent organizations among Reuters, AP, AFP, NATO, attacker government, and target
@@ -163,6 +190,8 @@ the original timestamp is sound, mandatory source classes are present, required 
 independent, and no contradiction remains. Use CONFIRMED only for complete evidence; otherwise use
 INCOMPLETE, CONTRADICTED, or NO_CANDIDATE. Use exactly the criterion keys supplied in the detector
 instructions. Never use sources for market prices or sizing.
+For a war, independently identify attacker_country_code and target_country_code as ISO 3166-1
+alpha-2 or alpha-3 codes. Set both fields to null for PANDEMIC or NONE.
 """
 
 
@@ -278,6 +307,22 @@ def validate_assessment(
             if item and not any(source_class(url) == "WHO" for url in item.citation_urls):
                 problems.append(f"WHO_SOURCE_MISSING:{criterion}")
     else:
+        attacker = normalize_iso_country_code(assessment.attacker_country_code)
+        target = normalize_iso_country_code(assessment.target_country_code)
+        if assessment.attacker_country_code is None:
+            problems.append("ATTACKER_COUNTRY_CODE_MISSING")
+        elif attacker is None:
+            problems.append("ATTACKER_COUNTRY_CODE_INVALID")
+        elif attacker not in (
+            G20_SOVEREIGN_MEMBERS.alpha2_codes | NUCLEAR_ARMED_STATES.alpha2_codes
+        ):
+            problems.append("ATTACKER_NOT_G20_OR_NUCLEAR_ARMED")
+        if assessment.target_country_code is None:
+            problems.append("TARGET_COUNTRY_CODE_MISSING")
+        elif target is None:
+            problems.append("TARGET_COUNTRY_CODE_INVALID")
+        elif target not in UN_MEMBER_STATES.alpha2_codes:
+            problems.append("TARGET_NOT_UN_MEMBER_STATE")
         un_item = evidence.get("UN_CROSS_BORDER_OPERATION")
         if un_item and not any(source_class(url) == "UN" for url in un_item.citation_urls):
             problems.append("UN_SOURCE_MISSING")
@@ -394,12 +439,22 @@ class OpenAIEventMonitor:
     @staticmethod
     def classify_pair(detector: ModelRun, verifier: ModelRun) -> EventCheckResult:
         verifier_problems = validate_assessment(verifier.assessment, verifier.sources)
+        country_codes_agree = True
+        if detector.assessment.event_type == EventType.MAJOR_INTERSTATE_WAR:
+            country_codes_agree = normalize_iso_country_code(
+                verifier.assessment.attacker_country_code
+            ) == normalize_iso_country_code(
+                detector.assessment.attacker_country_code
+            ) and normalize_iso_country_code(
+                verifier.assessment.target_country_code
+            ) == normalize_iso_country_code(detector.assessment.target_country_code)
         agreement = (
             verifier.assessment.verdict == ModelVerdict.CONFIRMED
             and verifier.assessment.event_type == detector.assessment.event_type
             and verifier.assessment.event_key == detector.assessment.event_key
             and verifier.assessment.original_qualifying_timestamp
             == detector.assessment.original_qualifying_timestamp
+            and country_codes_agree
         )
         if not agreement or verifier_problems:
             reason = verifier_problems or ["DETECTOR_VERIFIER_DISAGREEMENT"]

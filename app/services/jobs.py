@@ -98,7 +98,7 @@ def build_scheduler(database_path: str | Path) -> BackgroundScheduler:
     scheduler.add_job(
         refresh_market_data_job,
         "interval",
-        minutes=5,
+        seconds=30,
         id="refresh-ibkr-market-data",
         replace_existing=True,
     )

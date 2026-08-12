@@ -57,7 +57,13 @@ class MesQuote:
 
     @property
     def mark(self) -> Decimal | None:
-        if self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > 0:
+        if (
+            self.bid is not None
+            and self.ask is not None
+            and self.bid > 0
+            and self.ask > 0
+            and self.bid <= self.ask
+        ):
             return (self.bid + self.ask) / Decimal(2)
         if self.last is not None and self.last > 0:
             return self.last

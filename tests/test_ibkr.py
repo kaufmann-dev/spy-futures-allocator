@@ -47,3 +47,16 @@ def test_mes_mark_uses_last_only_without_valid_spread() -> None:
     )
     assert quote.mark == Decimal("6500.25")
     assert not quote.is_live
+
+
+def test_mes_mark_uses_last_when_bid_ask_are_crossed() -> None:
+    quote = MesQuote(
+        contract=mes_contract(),
+        bid=Decimal("6501.00"),
+        ask=Decimal("6500.50"),
+        last=Decimal("6500.25"),
+        timestamp=datetime.now(UTC),
+        market_data_type=1,
+    )
+
+    assert quote.mark == Decimal("6500.25")
