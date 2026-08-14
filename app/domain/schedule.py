@@ -1,4 +1,4 @@
-"""Monday/Thursday signal scheduling against the official XNYS calendar."""
+"""Generic next-XNYS-session-open scheduling for strategy target changes."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from .calculation import MAX_TARGET, ZERO
 from .errors import DomainError, ScheduleUnavailable
-from .types import decimal_value
+from .types import StrategyConfig, decimal_value
 
+ZERO = Decimal("0")
 NEW_YORK = ZoneInfo("America/New_York")
 
 
 class MarketCalendar(Protocol):
-    """The small calendar surface used by the deterministic scheduler."""
+    """The calendar surface required by deterministic scheduling."""
 
     def is_session(self, session_date: date) -> bool: ...
 
@@ -40,12 +40,10 @@ class XnysCalendar:
         return bool(self._calendar.is_session(session_date.isoformat()))
 
     def session_open(self, session_date: date) -> datetime:
-        value = self._calendar.session_open(session_date.isoformat())
-        return _calendar_datetime(value)
+        return _calendar_datetime(self._calendar.session_open(session_date.isoformat()))
 
     def session_close(self, session_date: date) -> datetime:
-        value = self._calendar.session_close(session_date.isoformat())
-        return _calendar_datetime(value)
+        return _calendar_datetime(self._calendar.session_close(session_date.isoformat()))
 
 
 def _calendar_datetime(value: object) -> datetime:
@@ -60,157 +58,183 @@ def _require_aware(value: datetime, *, field: str) -> None:
         raise ScheduleUnavailable(f"{field} must include a timezone")
 
 
+def _require_date(value: object, *, field: str) -> date:
+    if not isinstance(value, date) or type(value) is not date:
+        raise ScheduleUnavailable(f"{field} must be a date")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
-class SignalWindow:
+class TargetSignal:
+    """A changed signal target calculated after a completed session close."""
+
+    session_date: date
+    target_exposure: Decimal
+    calculated_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_date(self.session_date, field="session_date")
+        try:
+            target = decimal_value(self.target_exposure, field="target_exposure")
+        except DomainError as exc:
+            raise ScheduleUnavailable(str(exc)) from exc
+        if target < ZERO:
+            raise ScheduleUnavailable("target_exposure must be nonnegative")
+        _require_aware(self.calculated_at, field="calculated_at")
+        object.__setattr__(self, "target_exposure", target)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTargetInstruction:
+    """A target signal and the next real session open where it takes effect."""
+
     signal_session: date
     signal_at: datetime
+    target_exposure: Decimal
     execution_session: date
     effective_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
-class RawTargetSnapshot:
-    session_date: date
-    raw_target: Decimal
-    calculated_at: datetime
-
-    def __post_init__(self) -> None:
-        try:
-            target = decimal_value(self.raw_target, field="raw_target")
-        except DomainError as exc:
-            raise ScheduleUnavailable(str(exc)) from exc
-        if target < ZERO or target > MAX_TARGET:
-            raise ScheduleUnavailable("raw_target must be between 0 and 4.85")
-        _require_aware(self.calculated_at, field="calculated_at")
-        object.__setattr__(self, "raw_target", target)
-
-
-@dataclass(frozen=True, slots=True)
 class ScheduleState:
-    shadow_raw_target: Decimal
-    current_scheduled_target: Decimal
+    """Current and pending target reconstructed solely from target signals."""
+
+    latest_signal_target: Decimal
+    latest_signal_session: date
+    current_target: Decimal
     current_target_effective_at: datetime
-    pending_scheduled_target: Decimal | None
+    pending_target: Decimal | None
     pending_target_effective_at: datetime | None
-    next_valid_signal: datetime
-    next_valid_execution_window: datetime
+    next_market_open: datetime
 
 
-def signal_window_for(signal_session: date, calendar: MarketCalendar) -> SignalWindow | None:
-    """Return a slot only when both exact calendar days are normal sessions."""
+def _next_session_date(after_session: date, calendar: MarketCalendar) -> date:
+    for offset in range(1, 371):
+        candidate = after_session + timedelta(days=offset)
+        if calendar.is_session(candidate):
+            return candidate
+    raise ScheduleUnavailable("no XNYS session found within one year")
 
-    weekday = signal_session.weekday()
-    if weekday not in (0, 3) or not calendar.is_session(signal_session):
-        return None
-    execution_session = signal_session + timedelta(days=1)
-    required_execution_weekday = 1 if weekday == 0 else 4
-    if execution_session.weekday() != required_execution_weekday or not calendar.is_session(
-        execution_session
-    ):
-        return None
 
-    signal_at = calendar.session_close(signal_session)
-    effective_at = calendar.session_open(execution_session)
+def schedule_target(
+    signal: TargetSignal, calendar: MarketCalendar
+) -> ScheduledTargetInstruction:
+    """Schedule one close-derived target for the next actual XNYS open."""
+
+    if not isinstance(signal, TargetSignal):
+        raise ScheduleUnavailable("target history contains an invalid signal")
+    if not calendar.is_session(signal.session_date):
+        raise ScheduleUnavailable("target signal is not an XNYS session")
+    signal_at = calendar.session_close(signal.session_date)
     _require_aware(signal_at, field="signal_at")
+    if signal.calculated_at < signal_at:
+        raise ScheduleUnavailable("target was calculated before its session closed")
+
+    execution_session = _next_session_date(signal.session_date, calendar)
+    effective_at = calendar.session_open(execution_session)
     _require_aware(effective_at, field="effective_at")
     if effective_at <= signal_at:
-        raise ScheduleUnavailable("execution window must follow the signal close")
-    return SignalWindow(
-        signal_session=signal_session,
+        raise ScheduleUnavailable("execution open must follow the signal close")
+    return ScheduledTargetInstruction(
+        signal_session=signal.session_date,
         signal_at=signal_at,
+        target_exposure=signal.target_exposure,
         execution_session=execution_session,
         effective_at=effective_at,
     )
 
 
-def is_valid_signal_session(session_date: date, calendar: MarketCalendar) -> bool:
-    return signal_window_for(session_date, calendar) is not None
-
-
-def next_valid_window(after: datetime, calendar: MarketCalendar) -> SignalWindow:
-    """Find the next signal close strictly after a timestamp."""
+def next_session_open(after: datetime, calendar: MarketCalendar) -> datetime:
+    """Return the first actual XNYS session open strictly after ``after``."""
 
     _require_aware(after, field="after")
-    candidate = after.astimezone(NEW_YORK).date()
+    first_date = after.astimezone(NEW_YORK).date()
     for offset in range(371):
-        window = signal_window_for(candidate + timedelta(days=offset), calendar)
-        if window is not None and window.signal_at > after:
-            return window
-    raise ScheduleUnavailable("no valid signal window found within one year")
+        candidate = first_date + timedelta(days=offset)
+        if not calendar.is_session(candidate):
+            continue
+        market_open = calendar.session_open(candidate)
+        _require_aware(market_open, field="market_open")
+        if market_open > after:
+            return market_open
+    raise ScheduleUnavailable("no future XNYS open found within one year")
 
 
-def next_valid_execution(after: datetime, calendar: MarketCalendar) -> datetime:
-    """Find the next Tuesday/Friday open strictly after a timestamp.
+def is_review_session(
+    session_date: date, config: StrategyConfig, calendar: MarketCalendar
+) -> bool:
+    """Return true only for a configured weekday that is itself an XNYS session."""
 
-    Unlike ``next_valid_window``, this can return tomorrow's execution after its
-    Monday/Thursday signal has already closed. This is used for event recovery.
-    """
+    _require_date(session_date, field="session_date")
+    if not isinstance(config, StrategyConfig):
+        raise ScheduleUnavailable("config must be a StrategyConfig")
+    return config.reviews_on(session_date) and calendar.is_session(session_date)
+
+
+def next_review_close(
+    after: datetime, config: StrategyConfig, calendar: MarketCalendar
+) -> datetime:
+    """Return the next configured review close without carrying holidays forward."""
 
     _require_aware(after, field="after")
-    candidate = after.astimezone(NEW_YORK).date() - timedelta(days=1)
-    for offset in range(372):
-        window = signal_window_for(candidate + timedelta(days=offset), calendar)
-        if window is not None and window.effective_at > after:
-            return window.effective_at
-    raise ScheduleUnavailable("no valid execution window found within one year")
+    first_date = after.astimezone(NEW_YORK).date()
+    for offset in range(371):
+        candidate = first_date + timedelta(days=offset)
+        if not is_review_session(candidate, config, calendar):
+            continue
+        market_close = calendar.session_close(candidate)
+        _require_aware(market_close, field="market_close")
+        if market_close > after:
+            return market_close
+    raise ScheduleUnavailable("no configured review close found within one year")
 
 
 def reconstruct_schedule(
-    snapshots: Iterable[RawTargetSnapshot],
+    signals: Iterable[TargetSignal],
     *,
     as_of: datetime,
     calendar: MarketCalendar,
 ) -> ScheduleState:
-    """Rebuild current and pending targets solely from stored close snapshots."""
+    """Reconstruct current and pending targets from stored changed-target signals."""
 
     _require_aware(as_of, field="as_of")
-    ordered = list(snapshots)
+    ordered = list(signals)
     if not ordered:
-        raise ScheduleUnavailable("no target snapshots are available")
+        raise ScheduleUnavailable("no target signals are available")
 
     previous_date: date | None = None
-    visible: list[RawTargetSnapshot] = []
-    for snapshot in ordered:
-        if not isinstance(snapshot, RawTargetSnapshot):
-            raise ScheduleUnavailable("target history contains an invalid snapshot")
-        if previous_date is not None and snapshot.session_date <= previous_date:
-            raise ScheduleUnavailable("target snapshots must have unique, increasing session dates")
-        previous_date = snapshot.session_date
-        if not calendar.is_session(snapshot.session_date):
-            raise ScheduleUnavailable("target snapshot is not an XNYS session")
-        session_close = calendar.session_close(snapshot.session_date)
-        _require_aware(session_close, field="session_close")
-        if snapshot.calculated_at < session_close:
-            raise ScheduleUnavailable("target was calculated before its session closed")
-        if snapshot.calculated_at <= as_of:
-            visible.append(snapshot)
+    visible: list[tuple[TargetSignal, ScheduledTargetInstruction]] = []
+    for signal in ordered:
+        if not isinstance(signal, TargetSignal):
+            raise ScheduleUnavailable("target history contains an invalid signal")
+        if previous_date is not None and signal.session_date <= previous_date:
+            raise ScheduleUnavailable("target signals must have unique, increasing session dates")
+        previous_date = signal.session_date
+        instruction = schedule_target(signal, calendar)
+        if signal.calculated_at <= as_of:
+            visible.append((signal, instruction))
 
     if not visible:
-        raise ScheduleUnavailable("no completed target snapshot exists at this time")
+        raise ScheduleUnavailable("no completed target signal exists at this time")
 
-    current: tuple[Decimal, datetime] | None = None
-    pending: tuple[Decimal, datetime] | None = None
-    for snapshot in visible:
-        window = signal_window_for(snapshot.session_date, calendar)
-        if window is None:
-            continue
-        candidate = (snapshot.raw_target, window.effective_at)
-        if window.effective_at <= as_of:
-            current = candidate
-        elif pending is None or window.effective_at < pending[1]:
-            pending = candidate
+    current: ScheduledTargetInstruction | None = None
+    pending: ScheduledTargetInstruction | None = None
+    for _, instruction in visible:
+        if instruction.effective_at <= as_of:
+            current = instruction
+        elif pending is None or instruction.effective_at < pending.effective_at:
+            pending = instruction
 
     if current is None:
-        raise ScheduleUnavailable("current scheduled target cannot be reconstructed")
+        raise ScheduleUnavailable("current target cannot be reconstructed before its first open")
 
-    future = next_valid_window(as_of, calendar)
-    next_execution = pending[1] if pending is not None else next_valid_execution(as_of, calendar)
+    latest_signal = visible[-1][0]
     return ScheduleState(
-        shadow_raw_target=visible[-1].raw_target,
-        current_scheduled_target=current[0],
-        current_target_effective_at=current[1],
-        pending_scheduled_target=pending[0] if pending else None,
-        pending_target_effective_at=pending[1] if pending else None,
-        next_valid_signal=future.signal_at,
-        next_valid_execution_window=next_execution,
+        latest_signal_target=latest_signal.target_exposure,
+        latest_signal_session=latest_signal.session_date,
+        current_target=current.target_exposure,
+        current_target_effective_at=current.effective_at,
+        pending_target=pending.target_exposure if pending is not None else None,
+        pending_target_effective_at=pending.effective_at if pending is not None else None,
+        next_market_open=next_session_open(as_of, calendar),
     )

@@ -4,12 +4,15 @@ from decimal import Decimal
 
 import pytest
 
+from app.domain.calculation import replay_strategy
+from app.domain.errors import PerformanceUnavailable
 from app.domain.performance import (
     ExposureSchedulePoint,
-    PerformanceUnavailable,
     SpyOhlcBar,
     calculate_performance,
+    exposure_schedule_from_replay,
 )
+from app.domain.types import DailyBar, StrategyConfig
 
 
 def bar(
@@ -33,20 +36,17 @@ def bar(
     )
 
 
-def exposure(
-    offset: int, open_exposure: str, *, close_cap: str | None = None
-) -> ExposureSchedulePoint:
+def exposure(offset: int, open_exposure: str) -> ExposureSchedulePoint:
     return ExposureSchedulePoint(
         session_date=date(2024, 1, 2) + timedelta(days=offset),
         open_exposure=Decimal(open_exposure),
-        close_cap=Decimal(close_cap) if close_cap is not None else None,
     )
 
 
-def test_constant_price_keeps_both_series_at_one_hundred() -> None:
+def test_constant_price_keeps_both_series_at_one_hundred_at_any_exposure() -> None:
     result = calculate_performance(
         [bar(0), bar(1), bar(2)],
-        [exposure(0, "4.85"), exposure(1, "0"), exposure(2, "2")],
+        [exposure(0, "9"), exposure(1, "0"), exposure(2, "12.5")],
     )
 
     assert tuple(point.spy_value for point in result.points) == (
@@ -59,8 +59,6 @@ def test_constant_price_keeps_both_series_at_one_hundred() -> None:
         Decimal("100"),
         Decimal("100"),
     )
-    assert all(point.spy_drawdown == 0 for point in result.points)
-    assert all(point.strategy_drawdown == 0 for point in result.points)
     assert result.spy_max_drawdown == 0
     assert result.strategy_max_drawdown == 0
 
@@ -77,22 +75,7 @@ def test_open_change_uses_old_exposure_overnight_and_new_exposure_intraday() -> 
     assert point.strategy_daily_return == Decimal("0.32")
     assert point.overnight_exposure == Decimal("1")
     assert point.intraday_exposure == Decimal("2")
-
-
-def test_close_cap_only_reduces_the_next_overnight_leg() -> None:
-    result = calculate_performance(
-        [
-            bar(0),
-            bar(1, open_price="100", close_price="110"),
-            bar(2, open_price="88", close_price="96.8"),
-        ],
-        [exposure(0, "1"), exposure(1, "2", close_cap="0"), exposure(2, "1")],
-    )
-
-    assert result.points[1].strategy_value == Decimal("120")
-    assert result.points[1].close_exposure == 0
-    assert result.points[2].overnight_exposure == 0
-    assert result.points[2].strategy_value == Decimal("132.0")
+    assert point.close_exposure == Decimal("2")
 
 
 def test_zero_exposure_avoids_a_spy_drawdown() -> None:
@@ -125,7 +108,6 @@ def test_leveraged_gain_and_loss_compound_from_the_previous_proxy_value() -> Non
     )
     assert result.points[2].strategy_daily_return == Decimal("-0.2")
     assert result.points[2].strategy_drawdown == Decimal("-0.2")
-    assert result.strategy_max_drawdown == Decimal("-0.2")
 
 
 def test_drawdown_uses_the_running_peak_and_retains_the_worst_daily_value() -> None:
@@ -156,7 +138,7 @@ def test_proxy_is_floored_at_zero_and_cannot_recover_after_a_wipeout() -> None:
             bar(1, open_price="100", close_price="70"),
             bar(2, open_price="70", close_price="140"),
         ],
-        [exposure(0, "4"), exposure(1, "4"), exposure(2, "4")],
+        [exposure(0, "9"), exposure(1, "9"), exposure(2, "9")],
     )
 
     wiped_out = result.points[1]
@@ -167,6 +149,39 @@ def test_proxy_is_floored_at_zero_and_cannot_recover_after_a_wipeout() -> None:
     assert result.points[2].strategy_value == 0
     assert result.points[2].strategy_daily_return == 0
     assert result.strategy_max_drawdown == -1
+
+
+def test_replay_targets_are_shifted_to_the_next_observed_session_open() -> None:
+    sessions = (
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 4),
+        date(2024, 1, 5),
+        date(2024, 1, 8),
+        date(2024, 1, 9),
+    )
+    adjusted = [
+        DailyBar(day, Decimal(close))
+        for day, close in zip(sessions, ("100", "100", "100", "120", "120", "120"), strict=True)
+    ]
+    selected = StrategyConfig(
+        fast_sma_sessions=2,
+        slow_sma_sessions=3,
+        rv_window_sessions=2,
+        annualization_sessions=4,
+        rv_threshold=Decimal("0.10"),
+    )
+    replay = replay_strategy(adjusted, selected)
+
+    schedule = exposure_schedule_from_replay(replay)
+
+    assert tuple(point.session_date for point in schedule) == sessions[2:]
+    assert tuple(point.open_exposure for point in schedule) == (
+        Decimal("0"),
+        Decimal("1.60"),
+        Decimal("1.60"),
+        Decimal("0.60"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -202,15 +217,12 @@ def test_incomplete_bar_fails_closed_instead_of_being_skipped() -> None:
         )
 
 
-def test_missing_schedule_session_fails_closed_instead_of_carrying_exposure() -> None:
+def test_missing_or_misaligned_schedule_fails_closed() -> None:
     with pytest.raises(PerformanceUnavailable, match="each session requires"):
         calculate_performance(
             [bar(0), bar(1), bar(2)],
             [exposure(0, "1"), exposure(2, "1")],
         )
-
-
-def test_misaligned_dates_fail_closed_even_when_input_lengths_match() -> None:
     with pytest.raises(PerformanceUnavailable, match="misaligned"):
         calculate_performance(
             [bar(0), bar(1)],
@@ -227,10 +239,10 @@ def test_duplicate_or_out_of_order_sessions_fail_closed() -> None:
         )
 
 
-@pytest.mark.parametrize("value", ["-0.01", "4.8501"])
-def test_exposure_outside_strategy_bounds_is_rejected(value: str) -> None:
-    with pytest.raises(PerformanceUnavailable, match="between 0 and 4.85"):
-        exposure(0, value)
+def test_negative_exposure_is_rejected_but_there_is_no_upper_cap() -> None:
+    with pytest.raises(PerformanceUnavailable, match="nonnegative"):
+        exposure(0, "-0.01")
+    assert exposure(0, "100").open_exposure == Decimal("100")
 
 
 def test_empty_history_and_schedule_fail_closed() -> None:

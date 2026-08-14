@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import sqlite3
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,298 +11,216 @@ from app.db import (
     AuditEntry,
     ContractRecord,
     Database,
-    EventCaseRecord,
-    EventEvidenceRecord,
-    EventModelRunRecord,
-    EventStateRecord,
-    MesQuoteRecord,
+    FuturesQuoteRecord,
     RecommendationRecord,
     Repository,
-    SignalSnapshotRecord,
     SpyBarRecord,
+    StrategyConfigRecord,
+    StrategySnapshotRecord,
 )
 
-NOW = datetime(2026, 8, 12, 14, 30, tzinfo=UTC)
+NOW = datetime(2026, 8, 14, 20, tzinfo=UTC)
 
 
-@pytest.fixture
 def repository(tmp_path: Path) -> Repository:
-    repository = Repository(Database(tmp_path / "app.sqlite3"))
-    repository.initialize()
-    return repository
+    result = Repository(Database(tmp_path / "allocator.sqlite3"))
+    result.initialize()
+    return result
 
 
-def test_initialize_is_idempotent_and_preserves_other_component_tables(tmp_path: Path) -> None:
-    database = Database(tmp_path / "app.sqlite3")
-    with database.connect() as connection:
-        connection.execute("CREATE TABLE auth_owned (token TEXT PRIMARY KEY)")
-        connection.execute("INSERT INTO auth_owned VALUES ('kept')")
-    database.initialize()
-    database.initialize()
+def test_settings_defaults_and_update_round_trip(tmp_path: Path) -> None:
+    store = repository(tmp_path)
+    defaults = store.get_settings()
+    assert defaults.strategy_amount_usd is None
+    assert defaults.current_es_quantity is None
+    assert defaults.current_mes_quantity is None
+    assert defaults.fast_sma_sessions == 100
+    assert defaults.slow_sma_sessions == 500
+    assert defaults.rebound_fraction == Decimal("0.25")
+    assert defaults.rv_window_sessions == 20
+    assert defaults.annualization_sessions == 252
+    assert defaults.rv_threshold == Decimal("0.25")
+    assert defaults.normal_exposure == Decimal("1.60")
+    assert defaults.high_vol_exposure == Decimal("0.60")
+    assert defaults.review_weekdays == (0, 3)
 
-    with database.read() as connection:
-        assert connection.execute("SELECT token FROM auth_owned").fetchone()["token"] == "kept"  # noqa: S105
-        assert (
-            connection.execute(
-                "SELECT count(*) AS count FROM schema_migrations WHERE component = 'app'"
-            ).fetchone()["count"]
-            == 1
-        )
-
-
-def test_decimal_market_records_round_trip_without_float_conversion(repository: Repository) -> None:
-    repository.append_contract(
-        ContractRecord(
-            con_id=123,
-            symbol="MES",
-            local_symbol="MESU6",
-            exchange="CME",
-            currency="USD",
-            last_trade_date="20260918",
-            multiplier=Decimal("5.0000"),
-            resolved_at=NOW,
-        )
+    updated = store.update_settings(
+        strategy_amount_usd=Decimal("125000"),
+        current_es_quantity=-1,
+        current_mes_quantity=7,
+        fast_sma_sessions=80,
+        slow_sma_sessions=420,
+        review_weekdays=(1, 4),
     )
-    repository.append_spy_bar(
+    assert updated.strategy_amount_usd == Decimal("125000")
+    assert updated.current_es_quantity == -1
+    assert updated.current_mes_quantity == 7
+    assert store.get_settings().review_weekdays == (1, 4)
+
+
+def test_fresh_schema_refuses_a_legacy_database(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE app_settings (id INTEGER PRIMARY KEY)")
+    with pytest.raises(RuntimeError, match="fresh database path"):
+        Database(path).initialize()
+
+
+def test_adjusted_spy_bar_upsert_replaces_revised_history(tmp_path: Path) -> None:
+    store = repository(tmp_path)
+    first = SpyBarRecord(
+        session_date=date(2026, 8, 13),
+        open=Decimal("640"),
+        high=Decimal("645"),
+        low=Decimal("639"),
+        close=Decimal("644"),
+        volume=Decimal("10"),
+        completed_at=NOW - timedelta(days=1),
+        fetched_at=NOW,
+    )
+    store.upsert_spy_bar(first)
+    store.upsert_spy_bar(
         SpyBarRecord(
-            session_date=date(2026, 8, 11),
-            open=Decimal("701.1012"),
-            high=Decimal("706.3311"),
-            low=Decimal("700.0001"),
-            close=Decimal("705.1234"),
-            volume=Decimal("12345678"),
-            completed_at=NOW,
-            fetched_at=NOW,
+            session_date=first.session_date,
+            open=first.open,
+            high=first.high,
+            low=first.low,
+            close=Decimal("643.50"),
+            volume=first.volume,
+            completed_at=first.completed_at,
+            fetched_at=NOW + timedelta(minutes=30),
         )
     )
-    repository.append_mes_quote(
-        MesQuoteRecord(
-            con_id=123,
-            bid=Decimal("7012.25"),
-            ask=Decimal("7012.50"),
-            last=Decimal("7012.25"),
-            mark=Decimal("7012.375"),
-            market_data_type=1,
-            quoted_at=NOW,
-            received_at=NOW,
-        )
-    )
-
-    contract = repository.latest_contract()
-    bar = repository.latest_spy_bar()
-    quote = repository.latest_mes_quote()
-    assert contract is not None and contract.multiplier == Decimal("5.0000")
-    assert bar is not None and bar.close == Decimal("705.1234")
-    assert quote is not None and quote.mark == Decimal("7012.375")
-
-
-def test_latest_spy_bars_uses_latest_revision_per_session(repository: Repository) -> None:
-    for fetched_at, close in [
-        (datetime(2026, 8, 12, 1, tzinfo=UTC), Decimal("700")),
-        (datetime(2026, 8, 12, 2, tzinfo=UTC), Decimal("701")),
-    ]:
-        repository.append_spy_bar(
-            SpyBarRecord(
-                session_date=date(2026, 8, 11),
-                open=Decimal("1"),
-                high=Decimal("1"),
-                low=Decimal("1"),
-                close=close,
-                volume=None,
-                completed_at=fetched_at,
-                fetched_at=fetched_at,
-            )
-        )
-
-    bars = repository.latest_spy_bars()
+    bars = store.latest_spy_bars()
     assert len(bars) == 1
-    assert bars[0].close == Decimal("701")
+    assert bars[0].close == Decimal("643.50")
 
 
-def test_signal_history_and_lookup_are_bounded_and_chronological(repository: Repository) -> None:
-    for offset in range(3):
-        repository.append_signal_snapshot(
-            SignalSnapshotRecord(
-                session_date=date(2026, 8, 8 + offset),
-                spy_close=Decimal("700"),
-                sma200=Decimal("600"),
-                distance_above_sma200=Decimal("0.1"),
-                daily_return=Decimal("0.01"),
-                rv20=Decimal("0.12"),
-                prior_20_session_high=Decimal("705"),
-                dd20=Decimal("-0.007"),
-                base=Decimal("4.85"),
-                bonus=Decimal("0.6"),
-                volatility_cap=Decimal("8.3333"),
-                raw_target=Decimal(str(offset)),
-                shadow_raw_target=Decimal(str(offset)),
-                calculated_at=datetime(2026, 8, 8 + offset, 22, tzinfo=UTC),
+def test_contracts_and_quotes_are_partitioned_by_symbol(tmp_path: Path) -> None:
+    store = repository(tmp_path)
+    for symbol, multiplier, con_id in (("ES", "50", 1), ("MES", "5", 2)):
+        store.append_contract(
+            ContractRecord(
+                con_id=con_id,
+                symbol=symbol,
+                local_symbol=f"{symbol}Z6",
+                trading_class=symbol,
+                exchange="CME",
+                currency="USD",
+                last_trade_date="20261218",
+                multiplier=Decimal(multiplier),
+                resolved_at=NOW,
             )
         )
-
-    assert [item.raw_target for item in repository.signal_snapshot_history(2)] == [
-        Decimal("1"),
-        Decimal("2"),
-    ]
-    assert len(repository.signal_snapshots_for_session(date(2026, 8, 9))) == 1
-    with pytest.raises(ValueError):
-        repository.signal_snapshot_history(0)
-
-
-def test_latest_signal_snapshots_deduplicates_before_limiting(repository: Repository) -> None:
-    snapshots = [
-        (date(2026, 8, 8), Decimal("8"), datetime(2026, 8, 8, 22, tzinfo=UTC)),
-        (date(2026, 8, 9), Decimal("9"), datetime(2026, 8, 9, 22, tzinfo=UTC)),
-        (date(2026, 8, 10), Decimal("10"), datetime(2026, 8, 10, 22, tzinfo=UTC)),
-        (date(2026, 8, 10), Decimal("10.1"), datetime(2026, 8, 10, 23, tzinfo=UTC)),
-    ]
-    for session_date, raw_target, calculated_at in snapshots:
-        repository.append_signal_snapshot(
-            SignalSnapshotRecord(
-                session_date=session_date,
-                spy_close=Decimal("700"),
-                sma200=Decimal("600"),
-                distance_above_sma200=Decimal("0.1"),
-                daily_return=Decimal("0.01"),
-                rv20=Decimal("0.12"),
-                prior_20_session_high=Decimal("705"),
-                dd20=Decimal("-0.007"),
-                base=Decimal("4.85"),
-                bonus=Decimal("0.6"),
-                volatility_cap=Decimal("8.3333"),
-                raw_target=raw_target,
-                shadow_raw_target=raw_target,
-                calculated_at=calculated_at,
+        store.append_futures_quote(
+            FuturesQuoteRecord(
+                con_id=con_id,
+                symbol=symbol,
+                bid=Decimal("6500"),
+                ask=Decimal("6501"),
+                last=Decimal("6500.25"),
+                mark=Decimal("6500.5"),
+                market_data_type=1,
+                quoted_at=NOW,
+                received_at=NOW,
             )
         )
-
-    latest = repository.latest_signal_snapshots(2)
-
-    assert [item.session_date for item in latest] == [date(2026, 8, 9), date(2026, 8, 10)]
-    assert [item.raw_target for item in latest] == [Decimal("9"), Decimal("10.1")]
-    with pytest.raises(ValueError):
-        repository.latest_signal_snapshots(0)
+    assert store.latest_contract("ES").multiplier == Decimal("50")  # type: ignore[union-attr]
+    assert store.latest_contract("MES").multiplier == Decimal("5")  # type: ignore[union-attr]
+    assert store.latest_futures_quote("ES").symbol == "ES"  # type: ignore[union-attr]
+    assert store.latest_futures_quote("MES").symbol == "MES"  # type: ignore[union-attr]
 
 
-def test_incomplete_evidence_can_exist_without_event_case(repository: Repository) -> None:
-    model_run = repository.append_event_model_run(
-        EventModelRunRecord(
-            role="DETECTOR",
-            model="detector-model",
-            result="INCONCLUSIVE",
-            started_at=NOW,
-            completed_at=NOW,
-        )
-    )
-    evidence = repository.append_event_evidence(
-        EventEvidenceRecord(
-            event_case_id=None,
-            model_run_id=model_run.id,
-            criterion_key="original_timestamp",
-            supported=False,
-            contradiction=False,
-            excerpt="No qualifying timestamp found.",
-            recorded_at=NOW,
-        )
+def snapshot(
+    fingerprint: str, day: date, exposure: str, effective_at: datetime
+) -> StrategySnapshotRecord:
+    return StrategySnapshotRecord(
+        config_fingerprint=fingerprint,
+        session_date=day,
+        spy_close=Decimal("640"),
+        fast_sma=Decimal("630"),
+        slow_sma=Decimal("620"),
+        rv=Decimal("0.18"),
+        regime_state="RISK_ON",
+        exit_armed=True,
+        post_exit_low=None,
+        reentry_level=None,
+        volatility_state="NORMAL",
+        target_exposure=Decimal(exposure),
+        effective_at=effective_at,
+        calculated_at=NOW,
     )
 
-    assert evidence.id is not None
-    assert model_run.id is not None
-    assert repository.event_evidence_for_model_run(model_run.id)[0].event_case_id is None
 
-
-def test_event_recovery_state_round_trips_all_restart_fields(repository: Repository) -> None:
-    record = repository.append_event_state(
-        EventStateRecord(
-            state="RECOVERY_CONFIRMED",
-            event_cap=Decimal("0"),
-            occurred_at=NOW,
-            event_drawdown=Decimal("-0.01"),
-            lock_session=date(2026, 8, 1),
-            post_exit_low=Decimal("650.12"),
-            recovery_level=Decimal("695.6284"),
-            recovery_sessions=3,
-            recovery_confirmed_at=NOW,
-            release_at=datetime(2026, 8, 14, 13, 30, tzinfo=UTC),
-            last_evaluated_session=date(2026, 8, 11),
-        )
-    )
-
-    loaded = repository.latest_event_state()
-    assert loaded == record
-
-
-def test_event_state_transition_history_is_global_and_chronological(
-    repository: Repository,
+def test_configuration_snapshots_replace_atomically_and_schedule_by_effective_time(
+    tmp_path: Path,
 ) -> None:
-    cases = [
-        repository.upsert_event_case(
-            EventCaseRecord(
-                event_key=f"event-{index}",
-                event_type="PANDEMIC",
-                original_timestamp=NOW,
-                window_start=NOW,
-                window_end=NOW,
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        for index in range(2)
+    store = repository(tmp_path)
+    fingerprint = "a" * 64
+    stored = store.append_strategy_config(
+        StrategyConfigRecord(fingerprint, '{"normal_exposure":"1.60"}', NOW)
+    )
+    assert stored.id is not None
+    current_time = NOW + timedelta(hours=1)
+    records = [
+        snapshot(fingerprint, date(2026, 8, 13), "1.60", NOW),
+        snapshot(
+            fingerprint,
+            date(2026, 8, 14),
+            "0.60",
+            NOW + timedelta(days=3),
+        ),
     ]
-    assert cases[0].id is not None
-    assert cases[1].id is not None
+    store.replace_strategy_snapshots(fingerprint, records)
+    assert store.current_strategy_snapshot(fingerprint, current_time).target_exposure == Decimal(  # type: ignore[union-attr]
+        "1.60"
+    )
+    assert store.pending_strategy_snapshot(fingerprint, current_time).target_exposure == Decimal(  # type: ignore[union-attr]
+        "0.60"
+    )
 
-    transitions = [
-        (cases[0].id, "late", datetime(2026, 8, 12, 14, 33, tzinfo=UTC)),
-        (cases[1].id, "oldest", datetime(2026, 8, 12, 14, 31, tzinfo=UTC)),
-        (cases[0].id, "same-time-first", datetime(2026, 8, 12, 14, 32, tzinfo=UTC)),
-        (cases[1].id, "same-time-second", datetime(2026, 8, 12, 14, 32, tzinfo=UTC)),
-    ]
-    for event_case_id, reason, occurred_at in transitions:
-        repository.append_event_state(
-            EventStateRecord(
-                event_case_id=event_case_id,
-                state="WINDOW_ACTIVE",
-                event_cap=Decimal("4.85"),
-                reason=reason,
-                occurred_at=occurred_at,
-            )
-        )
-
-    history = repository.event_state_transition_history(3)
-
-    assert [item.reason for item in history] == ["same-time-first", "same-time-second", "late"]
-    assert {item.event_case_id for item in history} == {cases[0].id, cases[1].id}
-    with pytest.raises(ValueError):
-        repository.event_state_transition_history(0)
+    store.replace_strategy_snapshots(fingerprint, records[:1])
+    assert len(store.strategy_snapshots(fingerprint)) == 1
+    assert store.pending_strategy_snapshot(fingerprint, current_time) is None
 
 
-def test_recommendation_and_audit_history_are_bounded(repository: Repository) -> None:
-    for offset in range(3):
-        repository.append_recommendation(
-            RecommendationRecord(
-                status="LIVE",
-                calculated_at=datetime(2026, 8, 12, 12, offset, tzinfo=UTC),
-                is_pending=False,
-                quantity=offset,
-                contract_con_id=None,
-                contract_local_symbol="MESU6",
-                strategy_amount_usd=Decimal("100000"),
-                mes_mark=Decimal("7000"),
-                mes_mark_at=NOW,
-                mes_multiplier=Decimal("5"),
-                scheduled_target=Decimal("1"),
-                event_cap=Decimal("4.85"),
-                final_target=Decimal("1"),
-                contract_notional=Decimal("35000"),
-                target_notional=Decimal("100000"),
-                achieved_notional=Decimal(str(offset * 35000)),
-                achieved_leverage=Decimal(str(offset)) * Decimal("0.35"),
-                target_shortfall=Decimal("1") - Decimal(str(offset)) * Decimal("0.35"),
-                target_effective_at=NOW,
-            )
-        )
-        repository.append_audit(AuditEntry(action=f"event-{offset}", occurred_at=NOW))
+def recommendation(status: str = "LIVE") -> RecommendationRecord:
+    return RecommendationRecord(
+        status=status,
+        calculated_at=NOW,
+        is_pending=False,
+        config_fingerprint="a" * 64 if status == "LIVE" else None,
+        es_quantity=1 if status == "LIVE" else None,
+        mes_quantity=3 if status == "LIVE" else None,
+        es_contract_con_id=1 if status == "LIVE" else None,
+        es_contract_local_symbol="ESZ6" if status == "LIVE" else None,
+        es_mark=Decimal("6500") if status == "LIVE" else None,
+        es_mark_at=NOW if status == "LIVE" else None,
+        es_multiplier=Decimal("50") if status == "LIVE" else None,
+        mes_contract_con_id=2 if status == "LIVE" else None,
+        mes_contract_local_symbol="MESZ6" if status == "LIVE" else None,
+        mes_mark=Decimal("6500") if status == "LIVE" else None,
+        mes_mark_at=NOW if status == "LIVE" else None,
+        mes_multiplier=Decimal("5") if status == "LIVE" else None,
+        strategy_amount_usd=Decimal("250000") if status == "LIVE" else None,
+        target_exposure=Decimal("1.60") if status == "LIVE" else None,
+        target_notional=Decimal("400000") if status == "LIVE" else None,
+        achieved_notional=Decimal("390000") if status == "LIVE" else None,
+        achieved_exposure=Decimal("1.56") if status == "LIVE" else None,
+        target_shortfall=Decimal("0.04") if status == "LIVE" else None,
+        target_effective_at=NOW if status == "LIVE" else None,
+        reason=None if status == "LIVE" else "market data unavailable",
+    )
 
-    assert [item.quantity for item in repository.recommendation_history(2)] == [2, 1]
-    assert len(repository.audit_history(2)) == 2
+
+def test_recommendations_and_audit_history_are_bounded(tmp_path: Path) -> None:
+    store = repository(tmp_path)
+    store.append_strategy_config(StrategyConfigRecord("a" * 64, "{}", NOW))
+    live = store.append_recommendation(recommendation())
+    assert live.id is not None
+    store.append_recommendation(recommendation("UNAVAILABLE"))
+    assert store.latest_recommendation().status == "UNAVAILABLE"  # type: ignore[union-attr]
+    assert [item.status for item in store.recommendation_history(2)] == ["UNAVAILABLE", "LIVE"]
+
+    store.append_audit(AuditEntry("SETTINGS_UPDATED", NOW, "{}"))
+    assert store.audit_history(1)[0].action == "SETTINGS_UPDATED"

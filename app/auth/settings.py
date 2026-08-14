@@ -44,7 +44,7 @@ class AuthSettings:
     app_origin: str
     encryption_key: bytes
     database_path: str
-    cookie_name: str = "arl5_session"
+    cookie_name: str = "spy_futures_allocator_session"
     idle_timeout_seconds: int = 24 * 60 * 60
     absolute_timeout_seconds: int = 7 * 24 * 60 * 60
     flow_timeout_seconds: int = 10 * 60
@@ -90,8 +90,8 @@ class AuthSettings:
             client_secret=_required(env, "OIDC_CLIENT_SECRET"),
             app_origin=_required(env, "APP_ORIGIN"),
             encryption_key=_derive_key(_required(env, "SETTINGS_ENCRYPTION_KEY")),
-            database_path=env.get("DATABASE_PATH", "/data/arl5-simplified.sqlite3"),
-            cookie_name=env.get("SESSION_COOKIE_NAME", "arl5_session"),
+            database_path=env.get("DATABASE_PATH", "/data/spy-futures-allocator.sqlite3"),
+            cookie_name=env.get("SESSION_COOKIE_NAME", "spy_futures_allocator_session"),
             allow_insecure_http=allow_http,
         )
 

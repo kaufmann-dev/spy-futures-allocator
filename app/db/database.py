@@ -1,4 +1,4 @@
-"""SQLite connection and migration management."""
+"""SQLite connection and fresh v1 schema management."""
 
 from __future__ import annotations
 
@@ -9,34 +9,45 @@ from pathlib import Path
 from threading import Lock
 
 _MIGRATION_1 = r"""
-CREATE TABLE IF NOT EXISTS app_settings (
+CREATE TABLE app_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     strategy_amount_usd TEXT,
+    current_es_quantity INTEGER,
     current_mes_quantity INTEGER,
     ibkr_host TEXT NOT NULL,
     ibkr_port INTEGER NOT NULL CHECK (ibkr_port BETWEEN 1 AND 65535),
     ibkr_client_id INTEGER NOT NULL CHECK (ibkr_client_id >= 0),
-    openai_api_key_ciphertext BLOB,
-    detector_model TEXT NOT NULL,
-    verifier_model TEXT NOT NULL,
+    fast_sma_sessions INTEGER NOT NULL CHECK (fast_sma_sessions > 0),
+    slow_sma_sessions INTEGER NOT NULL CHECK (slow_sma_sessions > 0),
+    rebound_fraction TEXT NOT NULL,
+    rv_window_sessions INTEGER NOT NULL CHECK (rv_window_sessions >= 2),
+    annualization_sessions INTEGER NOT NULL CHECK (annualization_sessions > 0),
+    rv_threshold TEXT NOT NULL,
+    normal_exposure TEXT NOT NULL,
+    high_vol_exposure TEXT NOT NULL,
+    review_weekdays TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO app_settings (
-    id, strategy_amount_usd, current_mes_quantity,
+INSERT INTO app_settings (
+    id, strategy_amount_usd, current_es_quantity, current_mes_quantity,
     ibkr_host, ibkr_port, ibkr_client_id,
-    openai_api_key_ciphertext, detector_model, verifier_model, updated_at
+    fast_sma_sessions, slow_sma_sessions, rebound_fraction,
+    rv_window_sessions, annualization_sessions, rv_threshold,
+    normal_exposure, high_vol_exposure, review_weekdays, updated_at
 ) VALUES (
-    1, NULL, NULL,
+    1, NULL, NULL, NULL,
     '127.0.0.1', 4002, 51,
-    NULL, 'gpt-5.6-luna', 'gpt-5.6-terra',
+    100, 500, '0.25',
+    20, 252, '0.25',
+    '1.60', '0.60', '0,3',
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 );
 
-CREATE TABLE IF NOT EXISTS contracts (
+CREATE TABLE contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     con_id INTEGER NOT NULL,
-    symbol TEXT NOT NULL CHECK (symbol = 'MES'),
+    symbol TEXT NOT NULL CHECK (symbol IN ('ES', 'MES')),
     local_symbol TEXT NOT NULL,
     trading_class TEXT,
     exchange TEXT NOT NULL,
@@ -44,29 +55,28 @@ CREATE TABLE IF NOT EXISTS contracts (
     last_trade_date TEXT NOT NULL,
     multiplier TEXT NOT NULL,
     resolved_at TEXT NOT NULL,
-    UNIQUE (con_id, resolved_at)
+    UNIQUE (symbol, con_id, resolved_at)
 );
-CREATE INDEX IF NOT EXISTS contracts_resolved_at_idx
-    ON contracts (resolved_at DESC, id DESC);
+CREATE INDEX contracts_symbol_resolved_idx
+    ON contracts (symbol, resolved_at DESC, id DESC);
 
-CREATE TABLE IF NOT EXISTS spy_bars (
+CREATE TABLE spy_bars (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_date TEXT NOT NULL,
+    session_date TEXT NOT NULL UNIQUE,
     open TEXT NOT NULL,
     high TEXT NOT NULL,
     low TEXT NOT NULL,
     close TEXT NOT NULL,
     volume TEXT,
     completed_at TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    UNIQUE (session_date, fetched_at)
+    fetched_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS spy_bars_session_idx
-    ON spy_bars (session_date DESC, fetched_at DESC, id DESC);
+CREATE INDEX spy_bars_session_idx ON spy_bars (session_date DESC);
 
-CREATE TABLE IF NOT EXISTS mes_quotes (
+CREATE TABLE futures_quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     con_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL CHECK (symbol IN ('ES', 'MES')),
     bid TEXT,
     ask TEXT,
     last TEXT,
@@ -75,165 +85,82 @@ CREATE TABLE IF NOT EXISTS mes_quotes (
     quoted_at TEXT,
     received_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS mes_quotes_received_at_idx
-    ON mes_quotes (received_at DESC, id DESC);
+CREATE INDEX futures_quotes_symbol_received_idx
+    ON futures_quotes (symbol, received_at DESC, id DESC);
 
-CREATE TABLE IF NOT EXISTS signal_snapshots (
+CREATE TABLE strategy_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    config_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE strategy_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_fingerprint TEXT NOT NULL REFERENCES strategy_configs(fingerprint),
     session_date TEXT NOT NULL,
     spy_close TEXT NOT NULL,
-    sma200 TEXT NOT NULL,
-    distance_above_sma200 TEXT NOT NULL,
-    daily_return TEXT NOT NULL,
-    rv20 TEXT NOT NULL,
-    prior_20_session_high TEXT NOT NULL,
-    dd20 TEXT NOT NULL,
-    base TEXT NOT NULL,
-    bonus TEXT NOT NULL,
-    volatility_cap TEXT NOT NULL,
-    raw_target TEXT NOT NULL,
-    shadow_raw_target TEXT NOT NULL,
-    calculated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS signal_snapshots_calculated_idx
-    ON signal_snapshots (calculated_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS scheduled_targets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    signal_session_date TEXT NOT NULL,
-    target TEXT NOT NULL,
+    fast_sma TEXT NOT NULL,
+    slow_sma TEXT NOT NULL,
+    rv TEXT NOT NULL,
+    regime_state TEXT NOT NULL CHECK (regime_state IN ('RISK_ON', 'RISK_OFF')),
+    exit_armed INTEGER NOT NULL CHECK (exit_armed IN (0, 1)),
+    post_exit_low TEXT,
+    reentry_level TEXT,
+    volatility_state TEXT NOT NULL CHECK (volatility_state IN ('NORMAL', 'HIGH')),
+    target_exposure TEXT NOT NULL,
     effective_at TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('PENDING', 'EFFECTIVE', 'SKIPPED', 'SUPERSEDED')),
     calculated_at TEXT NOT NULL,
-    became_effective_at TEXT
+    UNIQUE (config_fingerprint, session_date)
 );
-CREATE INDEX IF NOT EXISTS scheduled_targets_state_effective_idx
-    ON scheduled_targets (state, effective_at DESC, id DESC);
+CREATE INDEX strategy_snapshots_config_session_idx
+    ON strategy_snapshots (config_fingerprint, session_date DESC);
+CREATE INDEX strategy_snapshots_config_effective_idx
+    ON strategy_snapshots (config_fingerprint, effective_at DESC);
 
-CREATE TABLE IF NOT EXISTS recommendations (
+CREATE TABLE recommendations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL CHECK (status IN ('LIVE', 'STALE', 'UNAVAILABLE')),
     calculated_at TEXT NOT NULL,
     is_pending INTEGER NOT NULL CHECK (is_pending IN (0, 1)),
-    quantity INTEGER CHECK (quantity IS NULL OR quantity >= 0),
-    contract_con_id INTEGER,
-    contract_local_symbol TEXT,
-    strategy_amount_usd TEXT,
+    config_fingerprint TEXT REFERENCES strategy_configs(fingerprint),
+    es_quantity INTEGER CHECK (es_quantity IS NULL OR es_quantity >= 0),
+    mes_quantity INTEGER CHECK (mes_quantity IS NULL OR mes_quantity >= 0),
+    es_contract_con_id INTEGER,
+    es_contract_local_symbol TEXT,
+    es_mark TEXT,
+    es_mark_at TEXT,
+    es_multiplier TEXT,
+    mes_contract_con_id INTEGER,
+    mes_contract_local_symbol TEXT,
     mes_mark TEXT,
     mes_mark_at TEXT,
     mes_multiplier TEXT,
-    scheduled_target TEXT,
-    event_cap TEXT,
-    final_target TEXT,
-    contract_notional TEXT,
+    strategy_amount_usd TEXT,
+    target_exposure TEXT,
     target_notional TEXT,
     achieved_notional TEXT,
-    achieved_leverage TEXT,
+    achieved_exposure TEXT,
     target_shortfall TEXT,
     target_effective_at TEXT,
     reason TEXT
 );
-CREATE INDEX IF NOT EXISTS recommendations_current_idx
+CREATE INDEX recommendations_current_idx
     ON recommendations (is_pending, calculated_at DESC, id DESC);
 
-CREATE TABLE IF NOT EXISTS event_cases (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_key TEXT NOT NULL UNIQUE,
-    event_type TEXT NOT NULL CHECK (event_type IN ('PANDEMIC', 'MAJOR_INTERSTATE_WAR')),
-    original_timestamp TEXT NOT NULL,
-    window_start TEXT NOT NULL,
-    window_end TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS event_model_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_case_id INTEGER REFERENCES event_cases(id),
-    role TEXT NOT NULL CHECK (role IN ('DETECTOR', 'VERIFIER')),
-    model TEXT NOT NULL,
-    response_id TEXT,
-    result TEXT NOT NULL,
-    structured_output_json TEXT,
-    error TEXT,
-    started_at TEXT NOT NULL,
-    completed_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS event_model_runs_completed_idx
-    ON event_model_runs (completed_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS event_documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_case_id INTEGER REFERENCES event_cases(id),
-    model_run_id INTEGER REFERENCES event_model_runs(id),
-    url TEXT NOT NULL,
-    title TEXT NOT NULL,
-    publisher TEXT NOT NULL,
-    source_class TEXT NOT NULL,
-    published_at TEXT,
-    retrieved_at TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    excerpt TEXT,
-    UNIQUE (event_case_id, url, content_hash)
-);
-CREATE INDEX IF NOT EXISTS event_documents_retrieved_idx
-    ON event_documents (retrieved_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS event_evidence (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_case_id INTEGER REFERENCES event_cases(id),
-    document_id INTEGER REFERENCES event_documents(id),
-    model_run_id INTEGER REFERENCES event_model_runs(id),
-    criterion_key TEXT NOT NULL,
-    supported INTEGER NOT NULL CHECK (supported IN (0, 1)),
-    contradiction INTEGER NOT NULL CHECK (contradiction IN (0, 1)),
-    excerpt TEXT,
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS event_evidence_case_idx
-    ON event_evidence (event_case_id, recorded_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS event_state_transitions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_case_id INTEGER REFERENCES event_cases(id),
-    state TEXT NOT NULL CHECK (state IN (
-        'NO_EVENT', 'NEEDS_HUMAN_REVIEW', 'WINDOW_ACTIVE',
-        'EVENT_LOCKED', 'RECOVERY_TRACKING', 'RECOVERY_CONFIRMED'
-    )),
-    event_cap TEXT NOT NULL,
-    event_drawdown TEXT,
-    lock_session TEXT,
-    post_exit_low TEXT,
-    recovery_level TEXT,
-    recovery_sessions INTEGER NOT NULL DEFAULT 0 CHECK (recovery_sessions BETWEEN 0 AND 3),
-    recovery_confirmed_at TEXT,
-    release_at TEXT,
-    last_evaluated_session TEXT,
-    reason TEXT,
-    occurred_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS event_state_transitions_occurred_idx
-    ON event_state_transitions (occurred_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS audit_entries (
+CREATE TABLE audit_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
     detail_json TEXT,
     occurred_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS audit_entries_occurred_idx
+CREATE INDEX audit_entries_occurred_idx
     ON audit_entries (occurred_at DESC, id DESC);
 """
 
 
 class Database:
-    """Owns short-lived SQLite connections and app-specific migrations.
-
-    Each operation gets its own connection, which is safe for the scheduler,
-    IBKR callback thread, and request workers.  Auth may create its own tables in
-    the same file; the component-scoped migration ledger deliberately avoids
-    taking ownership of SQLite's global ``user_version``.
-    """
+    """Own short-lived SQLite connections for the allocator and auth store."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -262,14 +189,22 @@ class Database:
             )
             applied = connection.execute(
                 "SELECT 1 FROM schema_migrations WHERE component = ? AND version = ?",
-                ("app", 1),
+                ("spy_futures_allocator", 1),
             ).fetchone()
             if applied is None:
+                legacy = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'"
+                ).fetchone()
+                if legacy is not None:
+                    raise RuntimeError(
+                        "SPY Futures Allocator requires a fresh database path; "
+                        "the selected database already contains another application schema"
+                    )
                 connection.executescript(_MIGRATION_1)
                 connection.execute(
                     """
                     INSERT INTO schema_migrations (component, version, applied_at)
-                    VALUES ('app', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    VALUES ('spy_futures_allocator', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                     """
                 )
 

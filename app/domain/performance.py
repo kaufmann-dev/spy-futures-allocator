@@ -1,6 +1,6 @@
 """Historical SPY-return proxy replay with explicit exposure timing.
 
-This module intentionally models a SPY simple-return proxy, not MES performance.
+This module intentionally models a SPY simple-return proxy, not ES/MES performance.
 It excludes futures basis, contract rolls, financing, commissions, and slippage.
 """
 
@@ -11,17 +11,13 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
 
-from .calculation import MAX_TARGET
-from .errors import DomainError
+from .calculation import StrategyReplay
+from .errors import DomainError, PerformanceUnavailable
 from .types import DecimalLike, decimal_value
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
 NORMALIZED_START = Decimal("100")
-
-
-class PerformanceUnavailable(DomainError):
-    """Historical proxy performance cannot be reconstructed safely."""
 
 
 def _performance_decimal(value: DecimalLike, *, field: str) -> Decimal:
@@ -71,40 +67,24 @@ class SpyOhlcBar:
 
 @dataclass(frozen=True, slots=True)
 class ExposureSchedulePoint:
-    """Exposure effective at a session open, with an optional close-time cap.
-
-    ``open_exposure`` applies from this session's open through its close. At the
-    close, ``close_cap`` can reduce that exposure for the close-to-next-open leg.
-    A cap never increases exposure and is released by the next session's open
-    instruction.
-    """
+    """Long-only exposure effective at this session's open."""
 
     session_date: date
     open_exposure: Decimal
-    close_cap: Decimal | None = None
 
     def __post_init__(self) -> None:
         _require_session_date(self.session_date, field="session_date")
         open_exposure = _performance_decimal(self.open_exposure, field="open_exposure")
-        if open_exposure < ZERO or open_exposure > MAX_TARGET:
-            raise PerformanceUnavailable("open_exposure must be between 0 and 4.85")
-
-        close_cap = self.close_cap
-        if close_cap is not None:
-            close_cap = _performance_decimal(close_cap, field="close_cap")
-            if close_cap < ZERO or close_cap > MAX_TARGET:
-                raise PerformanceUnavailable("close_cap must be between 0 and 4.85")
+        if open_exposure < ZERO:
+            raise PerformanceUnavailable("open_exposure must be nonnegative")
 
         object.__setattr__(self, "open_exposure", open_exposure)
-        object.__setattr__(self, "close_cap", close_cap)
 
     @property
     def close_exposure(self) -> Decimal:
-        """Exposure carried from this close until the next session opens."""
+        """Exposure carried from this close until the following session opens."""
 
-        if self.close_cap is None:
-            return self.open_exposure
-        return min(self.open_exposure, self.close_cap)
+        return self.open_exposure
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +111,41 @@ class PerformanceSeries:
     points: tuple[PerformancePoint, ...]
     spy_max_drawdown: Decimal
     strategy_max_drawdown: Decimal
+
+
+def exposure_schedule_from_replay(
+    replay: StrategyReplay, *, initial_exposure: DecimalLike = ZERO
+) -> tuple[ExposureSchedulePoint, ...]:
+    """Shift close-derived replay targets to the following observed session open.
+
+    The replay's first calculable close cannot affect that same session, so the
+    caller-supplied initial exposure applies there. Every later session receives
+    the target selected at the immediately preceding completed close. Because
+    replay bars contain actual sessions, exchange holidays require no carry rule.
+    """
+
+    if not isinstance(replay, StrategyReplay):
+        raise PerformanceUnavailable("replay must be a StrategyReplay")
+    initial = _performance_decimal(initial_exposure, field="initial_exposure")
+    if initial < ZERO:
+        raise PerformanceUnavailable("initial_exposure must be nonnegative")
+    if not replay.snapshots:
+        raise PerformanceUnavailable("strategy replay is empty")
+
+    points = [
+        ExposureSchedulePoint(
+            session_date=replay.snapshots[0].session_date,
+            open_exposure=initial,
+        )
+    ]
+    points.extend(
+        ExposureSchedulePoint(
+            session_date=current.session_date,
+            open_exposure=previous.target_exposure,
+        )
+        for previous, current in zip(replay.snapshots, replay.snapshots[1:], strict=False)
+    )
+    return tuple(points)
 
 
 def _validate_ordered_bars(bars: Sequence[object]) -> list[SpyOhlcBar]:

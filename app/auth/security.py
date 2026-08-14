@@ -70,7 +70,7 @@ class IdTokenCipher:
 
     @staticmethod
     def _aad(session_token_hash: str) -> bytes:
-        return f"arl5-simplified:oidc-id-token:{session_token_hash}".encode("ascii")
+        return f"spy-futures-allocator:oidc-id-token:{session_token_hash}".encode("ascii")
 
     def encrypt(self, id_token: str, session_token_hash: str) -> tuple[bytes, bytes]:
         nonce = secrets.token_bytes(12)

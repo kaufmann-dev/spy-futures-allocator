@@ -21,10 +21,6 @@ class JobRuntime(Protocol):
 
     def recalculate(self) -> None: ...
 
-    def update_event_overlay(self) -> None: ...
-
-    def check_events(self) -> None: ...
-
     def prune_auth(self) -> None: ...
 
     def bootstrap(self) -> None: ...
@@ -65,14 +61,6 @@ def recalculate_job() -> None:
     _call("recalculate")
 
 
-def update_event_overlay_job() -> None:
-    _call("update_event_overlay")
-
-
-def check_events_job() -> None:
-    _call("check_events")
-
-
 def prune_auth_job() -> None:
     _call("prune_auth")
 
@@ -106,21 +94,7 @@ def build_scheduler(database_path: str | Path) -> BackgroundScheduler:
         recalculate_job,
         "interval",
         minutes=5,
-        id="recalculate-target-and-sizing",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        update_event_overlay_job,
-        "interval",
-        minutes=5,
-        id="update-event-price-overlay",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        check_events_job,
-        "interval",
-        minutes=10,
-        id="check-systemic-event-evidence",
+        id="recalculate-strategy-and-allocation",
         replace_existing=True,
     )
     scheduler.add_job(

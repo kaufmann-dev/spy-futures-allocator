@@ -34,8 +34,8 @@ def _login_page(return_to: str, *, error: str | None = None, logged_out: bool = 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in · ARL-5 Simplified</title>
-<link rel="icon" type="image/svg+xml" sizes="any" href="/static/arl5-mark.svg">
+<title>Sign in · SPY Futures Allocator</title>
+<link rel="icon" type="image/svg+xml" sizes="any" href="/static/spy-futures-allocator-mark.svg">
 <style>
 :root {{ color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }}
 *, *::before, *::after {{ box-sizing: border-box; }}
@@ -66,8 +66,8 @@ button {{
 </head>
 <body>
 <main>
-<h1>ARL-5 Simplified</h1>
-<p>Sign in with Pocket ID to view the sizing monitor.</p>
+<h1>SPY Futures Allocator</h1>
+<p>Sign in with Pocket ID to view the futures allocation monitor.</p>
 {status}
 <form method="post" action="/auth/oidc/start">
 <input type="hidden" name="return_to" value="{safe_return}">

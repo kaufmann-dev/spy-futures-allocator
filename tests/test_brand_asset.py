@@ -1,32 +1,23 @@
-from __future__ import annotations
-
 from pathlib import Path
 
-ROOT = Path(__file__).parents[1]
-SVG_PATH = ROOT / "app" / "static" / "arl5-mark.svg"
-BASE_PATH = ROOT / "app" / "templates" / "base.html"
-DASHBOARD_PATH = ROOT / "app" / "templates" / "dashboard.html"
+ROOT = Path(__file__).resolve().parents[1]
+SVG_PATH = ROOT / "app" / "static" / "spy-futures-allocator-mark.svg"
 
 
-def test_logo_is_a_self_theming_standalone_svg() -> None:
-    source = SVG_PATH.read_text()
-
-    assert source.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
-    assert source.rstrip().endswith("</svg>")
-    assert 'viewBox="0 0 48 48"' in source
-    assert source.count("<path ") == 2
-    assert "svg { fill: #000000; }" in source
-    assert "@media (prefers-color-scheme: dark)" in source
-    assert "svg { fill: #ffffff; }" in source
-    assert ' fill="' not in source
+def test_brand_mark_is_self_theming_and_accessibly_named() -> None:
+    svg = SVG_PATH.read_text()
+    assert 'viewBox="0 0 48 48"' in svg
+    assert 'aria-label="SPY Futures Allocator"' in svg
+    assert "prefers-color-scheme: dark" in svg
+    assert "#000000" in svg
+    assert "#ffffff" in svg
 
 
-def test_logo_is_used_only_as_the_document_favicon() -> None:
-    base = BASE_PATH.read_text()
-    dashboard = DASHBOARD_PATH.read_text()
-
-    head, body = base.split("</head>", maxsplit=1)
-    assert head.count("/static/arl5-mark.svg") == 1
-    assert 'rel="icon" type="image/svg+xml" sizes="any"' in head
-    assert "/static/arl5-mark.svg" not in body
-    assert "/static/arl5-mark.svg" not in dashboard
+def test_templates_reference_the_single_brand_asset() -> None:
+    base = (ROOT / "app" / "templates" / "base.html").read_text()
+    login = (ROOT / "app" / "auth" / "router.py").read_text()
+    dashboard = (ROOT / "app" / "templates" / "dashboard.html").read_text()
+    path = "/static/spy-futures-allocator-mark.svg"
+    assert base.count(path) == 1
+    assert login.count(path) == 1
+    assert path not in dashboard

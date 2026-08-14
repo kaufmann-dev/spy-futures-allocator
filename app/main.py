@@ -5,21 +5,19 @@ import hashlib
 import hmac
 import logging
 import os
-import re
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app import __version__
 from app.auth import (
@@ -39,15 +37,13 @@ from app.db import (
     Repository,
     build_dashboard_view,
 )
-from app.domain.errors import DomainError
-from app.security import SecretBox
+from app.domain import DomainError, StrategyConfig
 from app.services.jobs import bootstrap_job, build_scheduler, configure_runtime
-from app.services.runtime import ApplicationRuntime
+from app.services.runtime import ApplicationRuntime, RuntimeUnavailable
 
 logger = logging.getLogger(__name__)
 
-PRODUCT_ID = "ARL5-MES-SIZING-EVENTS-1.0.0"
-SAFE_MODEL = re.compile(r"^gpt-[A-Za-z0-9._-]{1,90}$")
+PRODUCT_ID = "SPY-FUTURES-ALLOCATOR-1.0.0"
 CHART_VIEWS = ("performance", "drawdowns", "exposure", "trend", "risk")
 
 
@@ -55,23 +51,49 @@ def _chart_view(value: str | None) -> str:
     return value if value in CHART_VIEWS else "performance"
 
 
+def _integer_input(value: object) -> object:
+    """Accept HTML integer text or a real int, but never numeric coercions."""
+
+    if value is None or type(value) is int:
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        digits = cleaned[1:] if cleaned[:1] in {"+", "-"} else cleaned
+        if digits and digits.isascii() and digits.isdigit():
+            return cleaned
+    raise ValueError("integer settings must use whole numbers")
+
+
 class SettingsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy_amount_usd: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    current_es_quantity: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
     current_mes_quantity: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
     ibkr_host: str = Field(min_length=1, max_length=253)
     ibkr_port: int = Field(ge=1, le=65_535)
     ibkr_client_id: int = Field(ge=0, le=2_147_483_647)
-    openai_api_key: str | None = Field(default=None, min_length=20, max_length=512)
-    detector_model: str = Field(min_length=5, max_length=100)
-    verifier_model: str = Field(min_length=5, max_length=100)
+    fast_sma_sessions: int = Field(ge=1, le=100_000)
+    slow_sma_sessions: int = Field(ge=2, le=100_000)
+    rebound_fraction: Decimal = Field(gt=0)
+    rv_window_sessions: int = Field(ge=2, le=100_000)
+    annualization_sessions: int = Field(ge=1, le=100_000)
+    rv_threshold: Decimal = Field(gt=0)
+    normal_exposure: Decimal = Field(gt=0)
+    high_vol_exposure: Decimal = Field(gt=0)
+    review_weekdays: tuple[int, ...] = Field(min_length=1, max_length=5)
 
-    @field_validator("strategy_amount_usd")
+    @field_validator(
+        "strategy_amount_usd",
+        "rebound_fraction",
+        "rv_threshold",
+        "normal_exposure",
+        "high_vol_exposure",
+    )
     @classmethod
-    def finite_amount(cls, value: Decimal) -> Decimal:
+    def finite_decimal(cls, value: Decimal) -> Decimal:
         if not value.is_finite():
-            raise ValueError("strategy amount must be finite")
+            raise ValueError("numeric settings must be finite")
         return value
 
     @field_validator("ibkr_host")
@@ -84,21 +106,57 @@ class SettingsPayload(BaseModel):
             raise ValueError("IBKR host must not be a URL")
         return value
 
-    @field_validator("openai_api_key")
+    @field_validator(
+        "current_es_quantity",
+        "current_mes_quantity",
+        "ibkr_port",
+        "ibkr_client_id",
+        "fast_sma_sessions",
+        "slow_sma_sessions",
+        "rv_window_sessions",
+        "annualization_sessions",
+        mode="before",
+    )
     @classmethod
-    def clean_api_key(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        return cleaned or None
+    def integer_settings_are_not_coerced(cls, value: object) -> object:
+        return _integer_input(value)
 
-    @field_validator("detector_model", "verifier_model")
+    @field_validator("review_weekdays", mode="before")
     @classmethod
-    def safe_model(cls, value: str) -> str:
-        value = value.strip()
-        if not SAFE_MODEL.fullmatch(value):
-            raise ValueError("model must be a valid OpenAI GPT model identifier")
-        return value
+    def weekdays_are_integers(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("review weekdays must be integers")
+        try:
+            normalized = tuple(_integer_input(day) for day in value)
+        except ValueError as exc:
+            raise ValueError("review weekdays must be integers") from exc
+        if any(day is None for day in normalized):
+            raise ValueError("review weekdays must be integers")
+        return normalized
+
+    @field_validator("review_weekdays")
+    @classmethod
+    def canonical_weekdays(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(day < 0 or day > 4 for day in value):
+            raise ValueError("review weekdays must be between Monday and Friday")
+        if len(set(value)) != len(value):
+            raise ValueError("review weekdays must be unique")
+        return tuple(sorted(value))
+
+    @model_validator(mode="after")
+    def valid_strategy(self) -> Self:
+        StrategyConfig(
+            fast_sma_sessions=self.fast_sma_sessions,
+            slow_sma_sessions=self.slow_sma_sessions,
+            rebound_fraction=self.rebound_fraction,
+            rv_window_sessions=self.rv_window_sessions,
+            annualization_sessions=self.annualization_sessions,
+            rv_threshold=self.rv_threshold,
+            normal_exposure=self.normal_exposure,
+            high_vol_exposure=self.high_vol_exposure,
+            review_weekdays=self.review_weekdays,
+        )
+        return self
 
 
 def _decode_settings_key(value: str) -> bytes:
@@ -150,19 +208,30 @@ def _security_headers(response: Response, *, https: bool) -> None:
         )
 
 
+def _optional_integer(form: Any, name: str) -> str | None:
+    value = str(form.get(name, "")).strip()
+    return value or None
+
+
 def _form_settings(form: Any) -> SettingsPayload:
-    current = str(form.get("current_mes_quantity", "")).strip()
-    api_key = str(form.get("openai_api_key", "")).strip()
+    weekdays = tuple(form.getlist("review_weekdays"))
     return SettingsPayload.model_validate(
         {
             "strategy_amount_usd": form.get("strategy_amount_usd"),
-            "current_mes_quantity": current if current else None,
+            "current_es_quantity": _optional_integer(form, "current_es_quantity"),
+            "current_mes_quantity": _optional_integer(form, "current_mes_quantity"),
             "ibkr_host": form.get("ibkr_host"),
             "ibkr_port": form.get("ibkr_port"),
             "ibkr_client_id": form.get("ibkr_client_id"),
-            "openai_api_key": api_key if api_key else None,
-            "detector_model": form.get("detector_model"),
-            "verifier_model": form.get("verifier_model"),
+            "fast_sma_sessions": form.get("fast_sma_sessions"),
+            "slow_sma_sessions": form.get("slow_sma_sessions"),
+            "rebound_fraction": Decimal(str(form.get("rebound_percent"))) / Decimal(100),
+            "rv_window_sessions": form.get("rv_window_sessions"),
+            "annualization_sessions": form.get("annualization_sessions"),
+            "rv_threshold": Decimal(str(form.get("rv_threshold_percent"))) / Decimal(100),
+            "normal_exposure": form.get("normal_exposure"),
+            "high_vol_exposure": form.get("high_vol_exposure"),
+            "review_weekdays": weekdays,
         }
     )
 
@@ -188,11 +257,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     auth_store = SqliteAuthStore(str(config.database_path))
     auth_service = AuthService(auth_settings, auth_store, OidcProvider(auth_settings))
-    runtime = ApplicationRuntime(
-        repository,
-        auth_store,
-        SecretBox(config.settings_encryption_key.get_secret_value()),
-    )
+    runtime = ApplicationRuntime(repository, auth_store)
     configure_runtime(runtime)
     scheduler = build_scheduler(config.database_path)
 
@@ -210,7 +275,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         runtime.reset_ibkr()
 
     app = FastAPI(
-        title="ARL-5 Simplified",
+        title="SPY Futures Allocator",
         version=__version__,
         lifespan=lifespan,
         docs_url=None,
@@ -253,14 +318,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     def dashboard(*, csrf: str = "") -> DashboardView:
         try:
-            schedule = runtime.current_schedule()
             operational = OperationalOverrides(
                 ibkr_connection=runtime.ibkr_state,
-                next_valid_signal=schedule.next_valid_signal,
-                next_execution_window=schedule.next_valid_execution_window,
+                config_fingerprint=runtime.configuration_fingerprint,
+                next_regime_evaluation=runtime.next_regime_close(),
+                next_volatility_review=runtime.next_review_close(),
+                next_market_open=runtime.next_market_open(),
             )
-        except DomainError:
-            operational = OperationalOverrides(ibkr_connection=runtime.ibkr_state)
+        except (DomainError, RuntimeUnavailable):
+            operational = OperationalOverrides(
+                ibkr_connection=runtime.ibkr_state,
+                config_fingerprint=runtime.configuration_fingerprint,
+            )
         return build_dashboard_view(repository, operational=operational, csrf_token=csrf)
 
     @app.get("/api/health")
@@ -274,27 +343,39 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if session is None:
             return login_redirect(request)
         csrf = _csrf_token(raw_session or "", config.session_secret.get_secret_value())
-        view = dashboard(csrf=csrf)
-        chart_view = _chart_view(request.query_params.get("chart_view"))
         message_key = request.query_params.get("message")
         messages = {
-            "settings-saved": "Settings saved. Data jobs will use the new configuration.",
-            "event-check-complete": "Event evidence check completed.",
+            "settings-saved": "Settings saved and strategy history replayed.",
+            "strategy-reset": "Strategy defaults restored and history replayed.",
         }
         return templates.TemplateResponse(
             request,
             "dashboard.html",
             {
-                "view": view,
+                "view": dashboard(csrf=csrf),
                 "message": messages.get(message_key) if message_key is not None else None,
                 "error": None,
-                "chart_view": chart_view,
+                "chart_view": _chart_view(request.query_params.get("chart_view")),
             },
+        )
+
+    def settings_error(request: Request, raw_session: str) -> Response:
+        csrf = _csrf_token(raw_session, config.session_secret.get_secret_value())
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "view": dashboard(csrf=csrf),
+                "message": None,
+                "error": "Please correct the invalid settings values.",
+                "chart_view": "performance",
+            },
+            status_code=422,
         )
 
     @app.post("/settings")
     async def settings_form(request: Request, _session: object = Depends(active_guard)) -> Response:
-        form = await request.form(max_fields=20, max_files=0)
+        form = await request.form(max_fields=24, max_files=0)
         raw_session = request.cookies.get(auth_settings.cookie_name, "")
         _verify_csrf(
             raw_session,
@@ -303,21 +384,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         try:
             payload = _form_settings(form)
-        except Exception:
-            csrf = _csrf_token(raw_session, config.session_secret.get_secret_value())
-            return templates.TemplateResponse(
-                request,
-                "dashboard.html",
-                {
-                    "view": dashboard(csrf=csrf),
-                    "message": None,
-                    "error": "Please correct the invalid settings values.",
-                    "chart_view": "performance",
-                },
-                status_code=422,
-            )
-        runtime.save_settings(**payload.model_dump())
+            runtime.save_settings(**payload.model_dump())
+        except (ArithmeticError, DomainError, RuntimeUnavailable, ValueError):
+            return settings_error(request, raw_session)
         return RedirectResponse("/?message=settings-saved", status_code=303)
+
+    @app.post("/settings/reset-strategy")
+    async def reset_strategy(
+        request: Request, _session: object = Depends(active_guard)
+    ) -> Response:
+        form = await request.form(max_fields=2, max_files=0)
+        raw_session = request.cookies.get(auth_settings.cookie_name, "")
+        _verify_csrf(
+            raw_session,
+            str(form.get("csrf_token", "")),
+            config.session_secret.get_secret_value(),
+        )
+        runtime.reset_strategy()
+        return RedirectResponse("/?message=strategy-reset", status_code=303)
 
     @app.get("/api/current")
     async def current(_session: object = Depends(passive_guard)) -> object:
@@ -332,50 +416,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/api/history")
     async def history(_session: object = Depends(passive_guard)) -> object:
         return jsonable_encoder(repository.recommendation_history(100))
-
-    @app.get("/api/events")
-    async def events(_session: object = Depends(passive_guard)) -> object:
-        view = dashboard().as_dict()
-        return {"event": view["event"]}
-
-    @app.post("/api/events/check")
-    async def event_check(request: Request, _session: object = Depends(active_guard)) -> Response:
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type == "application/x-www-form-urlencoded":
-            form = await request.form(max_fields=5, max_files=0)
-            raw_session = request.cookies.get(auth_settings.cookie_name, "")
-            _verify_csrf(
-                raw_session,
-                str(form.get("csrf_token", "")),
-                config.session_secret.get_secret_value(),
-            )
-        try:
-            await run_in_threadpool(runtime.check_events)
-        except Exception:
-            logger.exception("manual event check failed closed")
-            if content_type == "application/x-www-form-urlencoded":
-                csrf = _csrf_token(
-                    request.cookies.get(auth_settings.cookie_name, ""),
-                    config.session_secret.get_secret_value(),
-                )
-                return templates.TemplateResponse(
-                    request,
-                    "dashboard.html",
-                    {
-                        "view": dashboard(csrf=csrf),
-                        "message": None,
-                        "error": "The event check could not complete. No event window was changed.",
-                        "chart_view": "performance",
-                    },
-                    status_code=503,
-                )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Event check could not complete; no event window was changed",
-            ) from None
-        if content_type == "application/x-www-form-urlencoded":
-            return RedirectResponse("/?message=event-check-complete", status_code=303)
-        return JSONResponse({"status": "complete"})
 
     return app
 

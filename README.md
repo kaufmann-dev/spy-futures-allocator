@@ -1,123 +1,136 @@
-# ARL-5 Simplified
+# SPY Futures Allocator
 
-ARL-5 Simplified is a single-user, read-only website that calculates how many MES contracts match a deterministic SPY leverage target. It also monitors narrowly defined pandemic and major-war evidence.
+SPY Futures Allocator is a single-user, read-only web application that turns a deterministic SPY signal into an ES/MES futures allocation. It uses manually configured strategy capital and signed current ES/MES quantities; it never reads an IBKR account or places, modifies, approves, or cancels orders.
 
-It cannot read an IBKR account or place, modify, approve, or cancel orders. Every result is notional sizing only; margin is not checked.
+The application shows the current and pending exposure targets, a non-overshooting ES/MES allocation, position differences, strategy state, signal history, and historical SPY-based charts. Recommendations are notional sizing only. They do not account for margin requirements, financing, futures basis and rolls, fees, slippage, taxes, or liquidation risk.
 
-The dashboard includes one switchable historical chart over the latest 252 completed sessions. It can show a normalized SPY-return rule replay against SPY, close-to-close drawdowns, invested versus zero-exposure periods, SPY versus SMA200, or RV20 and DD20 with their decision thresholds. The replay is a revised-data signal proxy rather than MES execution performance: it assumes fractional exposure at exact session open and close prices and excludes dividends, cash yield, futures basis and rolls, financing, fees, slippage, taxes, margin, and liquidation effects. The chart is derived from persisted IBKR bars and strategy calculations and uses no browser-side charting service.
+## Strategy
 
-## What gets deployed
+Signals use completed, regular-session, dividend- and split-adjusted SPY closes requested from IBKR as `ADJUSTED_LAST` bars. The application requests up to 40 years of history and fails closed when the configured lookback is unavailable.
 
-There is one Coolify application and one persistent SQLite volume. There is no PostgreSQL project, worker project, or separate scheduler service.
+The default strategy configuration is:
 
-```mermaid
-flowchart LR
-    Browser[Operator browser] -->|Pocket ID sign-in| App[ARL-5 Simplified<br/>one FastAPI app]
-    App -->|sessions, settings, history| DB[(SQLite file<br/>persistent /data volume)]
-    App -->|read-only market data| IBKR[TWS or IB Gateway]
-    App -->|two independent cited searches| OpenAI[OpenAI Responses API]
-    App -. OIDC .-> PocketID[Pocket ID]
-```
+- fast and slow moving averages: 100 and 500 sessions;
+- rebound threshold: 25% from the lowest post-exit close;
+- realized-volatility window and annualization: 20 sessions and 252;
+- annualized realized-volatility threshold: 25%;
+- normal-volatility exposure: 1.60x;
+- high-volatility exposure: 0.60x;
+- exposure review closes: Monday and Thursday.
 
-After deployment, configure these values inside the website:
+At the first session with enough history, the regime starts risk-on when the fast SMA is at or above the slow SMA and risk-off otherwise. A later transition from fast SMA at or above slow SMA to fast SMA below slow SMA exits to 0.00x exposure at the next actual XNYS session open.
 
-- strategy amount in USD;
-- optional current MES quantity for comparison only;
-- reachable TWS or IB Gateway host, port, and client ID;
-- OpenAI API key and detector/verifier models.
+After an exit, the crossover close initializes the trough and every later lower close updates it. A close at or above `trough × (1 + rebound fraction)` re-enters at the next actual XNYS session open. Re-entry evaluates realized volatility on that close even when it is not a configured review weekday. Another bearish exit cannot occur until the fast SMA has first moved strictly above the slow SMA.
 
-The OpenAI key is encrypted in SQLite. IBKR credentials are not stored because the app connects to an already-running TWS or Gateway API socket.
+During an ordinary risk-on period, the volatility bucket is reviewed only on configured weekday closes. A holiday does not move a missed review to another day. Annualized realized volatility is the sample standard deviation of daily SPY returns over the configured window multiplied by the square root of the annualization factor. Values below the threshold select normal exposure; values at or above it select high-volatility exposure. Risk-off always selects zero exposure. There is no built-in maximum-exposure cap.
 
-## Authentication Setup
+Strategy parameters, strategy capital, signed current ES/MES quantities, and the IBKR connection are configured in the website. Resetting strategy defaults restores only the strategy parameters; it preserves capital, current quantities, and IBKR settings. Saving either action immediately replays available history under the selected configuration.
 
-Create one confidential Pocket ID OIDC client and assign only the intended operator in Pocket ID.
+## Futures allocation
 
-- Public Client: **Off**
-- Callback URL: `https://arl5-simplified.kaufmann.dev/auth/oidc/callback`
-- Logout callback URL: `https://arl5-simplified.kaufmann.dev/auth/oidc/logout/callback`
+The target notional is `strategy capital × target exposure`. The allocator resolves same-expiry quarterly ES and MES contracts with the expected multipliers of 50 and 5, then:
+
+1. floors the number of ES contracts against the target notional;
+2. floors the number of MES contracts against the remaining notional;
+3. verifies that achieved notional and exposure do not exceed the target.
+
+Both contracts use the existing eight-calendar-day roll convention. A live allocation requires valid same-expiry contracts plus fresh, live quotes for both ES and MES. Delayed, frozen, stale, incomplete, or mismatched market data fails closed. The signal target may remain visible when quotes are unavailable, but no live contract allocation is published.
+
+## Architecture
+
+One FastAPI process serves the authenticated dashboard and API and runs the in-process market-data schedule. SQLite stores settings, adjusted SPY bars, ES/MES contracts and quotes, strategy configurations, replay snapshots, recommendations, sessions, and audit entries. Pocket ID provides OIDC authentication. TWS or IB Gateway is the only market-data integration.
+
+There is one deployable application and one persistent SQLite volume. No PostgreSQL database, worker, or separate scheduler service is needed.
+
+## Authentication setup
+
+Create one confidential Pocket ID OIDC client and assign only the intended operator.
+
+- Public Client: off
+- Callback URL: `https://spy-futures-allocator.kaufmann.dev/auth/oidc/callback`
+- Logout callback URL: `https://spy-futures-allocator.kaufmann.dev/auth/oidc/logout/callback`
 - Flow: Authorization Code with PKCE S256
 - Token endpoint authentication: `client_secret_post`
 
-Required authentication environment variables:
+The app stores only an opaque local session cookie. Sessions use a 24-hour sliding idle timeout and a seven-day absolute limit; access and refresh tokens are never stored.
 
-- `APP_ORIGIN` — public origin, without a trailing slash.
-- `OIDC_ISSUER_URL` — Pocket ID issuer URL, without a trailing slash.
-- `OIDC_CLIENT_ID` — confidential client ID.
-- `OIDC_CLIENT_SECRET` — confidential client secret.
-- `SESSION_SECRET` — random value of at least 32 characters, used for form protection.
-- `SETTINGS_ENCRYPTION_KEY` — URL-safe base64 encoding of exactly 32 random bytes; protects the OpenAI key and OIDC logout hint.
-- `DATABASE_PATH` — SQLite path; production uses `/data/arl5-simplified.sqlite3`.
-
-Optional authentication variables:
-
-- `SESSION_COOKIE_NAME` — defaults to `arl5_session`.
-
-Generate each random secret separately:
+Generate the session and encryption secrets separately:
 
 ```bash
 python -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-The app stores only an opaque local session cookie. Sessions have a 24-hour sliding idle timeout and a seven-day absolute limit. Access and refresh tokens are never stored.
-
 ## Coolify Deployment
 
-- Build Pack: **Nixpacks**
-- Base Directory: `/`
-- Domain: `https://arl5-simplified.kaufmann.dev`
-- Health check path: `/api/health`
-- Instances: exactly **1** (the scheduler runs inside the app)
-- Persistent storage: mount a volume at `/data`
-- Required variables: all variables from **Authentication Setup** above
-- Optional variable: `LOG_LEVEL` defaults to `INFO`
+Connect Coolify to the private repository [kaufmann-dev/spy-futures-allocator](https://github.com/kaufmann-dev/spy-futures-allocator) and grant its GitHub integration access to that repository. Point the existing application at this new source, or create a replacement application, then use these Coolify settings:
 
-No pre-deployment command, post-deployment command, PostgreSQL database, or companion service is required. SQLite schema migrations run safely when the app starts.
+- Build Pack: Nixpacks
+- Base Directory: `/`
+- Domain: `https://spy-futures-allocator.kaufmann.dev`
+- Health Check Path: `/api/health`
+- Instances: exactly one
+- Persistent Storage: mount a persistent volume at `/data`
+
+Required environment variables:
+
+- `APP_ORIGIN` — public origin without a trailing slash; use `https://spy-futures-allocator.kaufmann.dev` in production.
+- `OIDC_ISSUER_URL` — Pocket ID issuer URL without a trailing slash.
+- `OIDC_CLIENT_ID` — confidential Pocket ID client ID.
+- `OIDC_CLIENT_SECRET` — confidential Pocket ID client secret.
+- `SESSION_SECRET` — independently generated random value of at least 32 characters.
+- `SETTINGS_ENCRYPTION_KEY` — URL-safe base64 encoding of exactly 32 random bytes.
+- `DATABASE_PATH` — use `/data/spy-futures-allocator.sqlite3`.
+
+Optional environment variables:
+
+- `SESSION_COOKIE_NAME` — defaults to `spy_futures_allocator_session`.
+- `LOG_LEVEL` — defaults to `INFO`.
+
+Do not configure pre- or post-deployment commands. The repository's `nixpacks.toml` supplies the `spy-futures-allocator` start command, the app binds to Coolify's injected `PORT`, and the SQLite schema is initialized at startup. After changing the source or domain, update the Pocket ID callback and logout callback URLs to the values in **Authentication setup**, then redeploy.
 
 ## Interactive Brokers
 
-The website uses only the official `ibapi` package and only these requests:
+The website makes only read-only market-data requests through the official `ibapi` package:
 
-- SPY contract details and completed regular-session daily bars;
-- active quarterly MES contract details;
-- live MES bid, ask, last, timestamp, and market-data type.
+- SPY contract details and completed regular-session `ADJUSTED_LAST` daily bars;
+- active quarterly ES and MES contract details;
+- live ES and MES bid, ask, last, timestamp, and market-data type.
 
 In TWS or IB Gateway:
 
-1. enable the socket API;
-2. enable **Read-Only API**;
-3. allow the Coolify host to reach the API socket through a private network or tunnel;
-4. use an unused client ID;
-5. ensure the account has live CME/MES market data and the SPY historical-data entitlement needed by IBKR.
-
-The website refuses a new result when the connection, contract, completed SPY history, or live MES quote is unavailable. Delayed or frozen MES data is not accepted.
+1. enable the socket API and Read-Only API;
+2. allow the Coolify application to reach the API socket through a private network or tunnel;
+3. configure an unused client ID in the website;
+4. ensure the account has the required live CME ES/MES and SPY historical-data entitlements.
 
 ## Local development
+
+Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```bash
 cp .env.example .env
 uv sync --all-groups
-uv run arl5-simplified
+uv run spy-futures-allocator
 ```
 
-Plain HTTP is accepted only when `APP_ORIGIN` uses `localhost` or `127.0.0.1`. Keep the SQLite file outside the repository or use the default ignored local filename.
+Fill every required value in `.env` before starting. Plain HTTP is accepted only when `APP_ORIGIN` uses `localhost` or `127.0.0.1`. Keep the SQLite file outside the repository or use the ignored local default.
 
-Checks:
+Run the checks independently:
 
 ```bash
-uv run ruff check app tests
 uv run mypy app tests
+uv run ruff check app tests
 uv run pytest
+uv build
 ```
 
 ## API
 
-All endpoints except health and OIDC entry/callback routes require the local session.
+`GET /api/health` is public. OIDC entry and callback routes are accessible as needed for authentication. All other endpoints require the local session; state-changing requests also require CSRF protection.
 
-- `GET /api/current`
-- `PUT /api/settings`
-- `GET /api/history`
-- `GET /api/events`
-- `POST /api/events/check`
-- `GET /api/health`
+- `GET /api/current` — current and pending strategy state and ES/MES allocation.
+- `GET /api/history` — persisted recommendation history.
+- `PUT /api/settings` — update capital, current positions, IBKR settings, and strategy configuration.
+- `POST /settings/reset-strategy` — restore strategy defaults while preserving capital, positions, and IBKR settings.
 
-There are deliberately no order, execution, account, position, margin, backtest, optimization, performance, or notification endpoints.
+There are deliberately no order, execution, account, position, margin, or optimization endpoints.

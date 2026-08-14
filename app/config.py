@@ -17,14 +17,16 @@ class AppConfig(BaseSettings):
 
     app_origin: AnyHttpUrl = Field(alias="APP_ORIGIN")
     database_path: Path = Field(
-        default=Path("/data/arl5-simplified.sqlite3"), alias="DATABASE_PATH"
+        default=Path("/data/spy-futures-allocator.sqlite3"), alias="DATABASE_PATH"
     )
     session_secret: SecretStr = Field(alias="SESSION_SECRET")
     settings_encryption_key: SecretStr = Field(alias="SETTINGS_ENCRYPTION_KEY")
     oidc_issuer_url: AnyHttpUrl = Field(alias="OIDC_ISSUER_URL")
     oidc_client_id: str = Field(min_length=1, alias="OIDC_CLIENT_ID")
     oidc_client_secret: SecretStr = Field(alias="OIDC_CLIENT_SECRET")
-    session_cookie_name: str = Field(default="arl5_session", alias="SESSION_COOKIE_NAME")
+    session_cookie_name: str = Field(
+        default="spy_futures_allocator_session", alias="SESSION_COOKIE_NAME"
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @field_validator("app_origin", "oidc_issuer_url")

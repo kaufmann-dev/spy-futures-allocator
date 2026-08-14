@@ -1,41 +1,49 @@
-"""Application persistence API."""
+"""Persistence and dashboard API."""
 
 from .database import Database
 from .models import (
     AppSettings,
     AuditEntry,
     ContractRecord,
-    EventCaseRecord,
-    EventDocumentRecord,
-    EventEvidenceRecord,
-    EventModelRunRecord,
-    EventStateRecord,
-    MesQuoteRecord,
+    FuturesQuoteRecord,
     RecommendationRecord,
-    ScheduledTargetRecord,
-    SignalSnapshotRecord,
     SpyBarRecord,
+    StrategyConfigRecord,
+    StrategySnapshotRecord,
 )
 from .repository import Repository
-from .views import DashboardView, OperationalOverrides, build_dashboard_view
+from .views import (
+    DashboardView,
+    HistoryRow,
+    MetricRow,
+    OperationalOverrides,
+    PendingView,
+    RecommendationView,
+    SettingsView,
+    StatusCell,
+    StrategyChartView,
+    build_dashboard_view,
+)
 
 __all__ = [
     "AppSettings",
     "AuditEntry",
     "ContractRecord",
-    "Database",
     "DashboardView",
-    "EventCaseRecord",
-    "EventDocumentRecord",
-    "EventEvidenceRecord",
-    "EventModelRunRecord",
-    "EventStateRecord",
-    "MesQuoteRecord",
+    "Database",
+    "FuturesQuoteRecord",
+    "HistoryRow",
+    "MetricRow",
     "OperationalOverrides",
+    "PendingView",
     "RecommendationRecord",
+    "RecommendationView",
     "Repository",
-    "ScheduledTargetRecord",
-    "SignalSnapshotRecord",
+    "SettingsView",
     "SpyBarRecord",
+    "StatusCell",
+    "StrategyConfigRecord",
+    "StrategyChartView",
+    "StrategySnapshotRecord",
     "build_dashboard_view",
 ]

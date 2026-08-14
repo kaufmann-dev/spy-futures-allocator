@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}ARL-5 MES Sizing and Event Monitor{% endblock %}
+{% block title %}SPY Futures Allocator{% endblock %}
 {% block body %}
 <header class="site-header">
-	<div>
-		<a class="wordmark" href="/">ARL-5 <span>SIMPLIFIED</span></a>
-		<p>MES sizing and systemic-event monitor</p>
+	<div class="brand-lockup">
+		<a class="wordmark" href="/">SPY FUTURES <span>ALLOCATOR</span></a>
+		<p>SPY signals with ES and MES exposure</p>
 	</div>
 	<form action="/auth/logout" method="post">
 		<button class="button button-secondary" type="submit">Sign out</button>
@@ -17,7 +17,7 @@
 		<div class="status-cell">
 			<span class="status-label">{{ item.label }}</span>
 			<span class="status-value"><i class="status-dot state-{{ item.state|lower }}" aria-hidden="true"></i>{{ item.value }}</span>
-			<span class="sr-only">Status: {{ item.state }}</span>
+			<span class="sr-only">Status: {{ item.state|replace('_', ' ') }}</span>
 		</div>
 		{% endfor %}
 	</section>
@@ -26,77 +26,77 @@
 	{% if error %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endif %}
 
 	<section class="result-panel state-border-{{ view.recommendation.state|lower }}" aria-labelledby="current-result">
-		<div class="result-state"><i class="status-dot state-{{ view.recommendation.state|lower }}" aria-hidden="true"></i>{{ view.recommendation.state }}</div>
+		<div class="result-state"><i class="status-dot state-{{ view.recommendation.state|lower }}" aria-hidden="true"></i>{{ view.recommendation.state|replace('_', ' ') }}</div>
 		<h1 id="current-result">{{ view.recommendation.headline }}</h1>
 		{% if view.recommendation.reason %}<p class="result-reason">{{ view.recommendation.reason }}</p>{% endif %}
 
-		{% if view.recommendation.historical_quantity is not none %}
-		<p class="historical-result">Last historical result: {{ view.recommendation.historical_quantity }} MES. It is not a current recommendation.</p>
+		{% if view.recommendation.historical_allocation %}
+		<p class="historical-result">Last historical allocation: {{ view.recommendation.historical_allocation }}. This is not a live allocation.</p>
 		{% endif %}
 
 		<dl class="result-grid">
-			<div><dt>Active MES contract</dt><dd>{{ view.recommendation.active_contract }}</dd></div>
-			<div><dt>Strategy amount</dt><dd>{{ view.recommendation.strategy_amount }}</dd></div>
+			<div><dt>ES contract</dt><dd>{{ view.recommendation.es_contract }}</dd></div>
+			<div><dt>MES contract</dt><dd>{{ view.recommendation.mes_contract }}</dd></div>
+			<div><dt>Strategy capital</dt><dd>{{ view.recommendation.strategy_amount }}</dd></div>
+			<div><dt>Effective</dt><dd>{{ view.recommendation.effective_at }}</dd></div>
+			<div><dt>ES mark</dt><dd>{{ view.recommendation.es_mark }}<small class="value-note">{{ view.recommendation.es_mark_at }}</small></dd></div>
 			<div><dt>MES mark</dt><dd>{{ view.recommendation.mes_mark }}<small class="value-note">{{ view.recommendation.mes_mark_at }}</small></dd></div>
-			<div><dt>Final target</dt><dd>{{ view.recommendation.final_target }}</dd></div>
-			<div><dt>Achieved leverage</dt><dd>{{ view.recommendation.achieved_leverage }}</dd></div>
+			<div><dt>Target exposure</dt><dd>{{ view.recommendation.target_exposure }}</dd></div>
+			<div><dt>Achieved exposure</dt><dd>{{ view.recommendation.achieved_exposure }}</dd></div>
 			<div><dt>Target notional</dt><dd>{{ view.recommendation.target_notional }}</dd></div>
 			<div><dt>Achieved notional</dt><dd>{{ view.recommendation.achieved_notional }}</dd></div>
-			<div><dt>Effective</dt><dd>{{ view.recommendation.effective_at }}</dd></div>
 		</dl>
 
-		{% if view.recommendation.quantity is not none and view.recommendation.current_quantity is not none %}
-		<dl class="comparison" aria-label="MES quantity comparison">
-			<div><dt>Current</dt><dd>{{ view.recommendation.current_quantity }} MES</dd></div>
-			<div><dt>Target</dt><dd>{{ view.recommendation.quantity }} MES</dd></div>
-			<div><dt>Difference</dt><dd>{{ "%+d"|format(view.recommendation.quantity_difference) }} MES</dd></div>
+		<dl class="comparison" aria-label="Current futures positions and required changes">
+			<div><dt>Current position</dt><dd>{{ view.recommendation.current_es_quantity }} ES + {{ view.recommendation.current_mes_quantity }} MES</dd></div>
+			<div><dt>ES change</dt><dd>{{ view.recommendation.es_difference }} ES</dd></div>
+			<div><dt>MES change</dt><dd>{{ view.recommendation.mes_difference }} MES</dd></div>
 		</dl>
-		{% endif %}
 
-		<p class="sizing-warning">NOTIONAL SIZING ONLY — MARGIN NOT CHECKED</p>
+		<p class="sizing-warning">NOTIONAL ALLOCATION ONLY — MARGIN AND ORDER PLACEMENT ARE NOT CHECKED</p>
 	</section>
 
 	{% if view.pending %}
 	<section class="pending-panel" aria-labelledby="pending-result">
 		<div>
-			<span class="section-label">Indicative estimate</span>
-			<h2 id="pending-result">PENDING NEXT WINDOW: {{ view.pending.quantity }} MES</h2>
+			<span class="section-label">Pending allocation</span>
+			<h2 id="pending-result">{{ view.pending.headline }}</h2>
 		</div>
 		<dl>
 			<div><dt>Effective</dt><dd>{{ view.pending.effective_at }}</dd></div>
-			<div><dt>Pending target</dt><dd>{{ view.pending.target }}</dd></div>
+			<div><dt>Target exposure</dt><dd>{{ view.pending.target_exposure }}</dd></div>
 		</dl>
-		<p>Uses the current live MES mark. The quantity can change before the execution window.</p>
-		<p class="sizing-warning">NOTIONAL SIZING ONLY — MARGIN NOT CHECKED</p>
+		<p>The signal has changed; this target becomes active at the listed market-session open.</p>
 	</section>
 	{% endif %}
 
 	<section class="panel strategy-chart-panel" aria-labelledby="strategy-chart-heading">
 		<div class="panel-heading">
 			<h2 id="strategy-chart-heading">Strategy history</h2>
-			<span>{% if view.strategy_chart.available %}{{ view.strategy_chart.session_count }} sessions{% else %}Completed sessions only{% endif %}</span>
+			<span>{% if view.strategy_chart.available %}{{ view.strategy_chart.session_count }} sessions{% else %}Completed SPY sessions{% endif %}</span>
 		</div>
 		{% if view.strategy_chart.available %}
 		<nav class="chart-view-switcher" aria-label="Chart view">
 			<form class="chart-view-buttons" method="get" action="/#strategy-chart-heading">
-				<button type="submit" name="chart_view" value="performance" aria-label="Historical performance"{% if chart_view == 'performance' %} aria-current="true"{% endif %}>Return</button>
-				<button type="submit" name="chart_view" value="drawdowns" aria-label="Historical drawdowns"{% if chart_view == 'drawdowns' %} aria-current="true"{% endif %}>Drawdown</button>
-				<button type="submit" name="chart_view" value="exposure" aria-label="Historical exposure"{% if chart_view == 'exposure' %} aria-current="true"{% endif %}>Exposure</button>
-				<button type="submit" name="chart_view" value="trend" aria-label="SPY and SMA200 trend"{% if chart_view == 'trend' %} aria-current="true"{% endif %}>Trend</button>
-				<button type="submit" name="chart_view" value="risk" aria-label="RV20 and DD20 risk"{% if chart_view == 'risk' %} aria-current="true"{% endif %}>Risk</button>
+				<button type="submit" name="chart_view" value="performance"{% if chart_view == 'performance' %} aria-current="true"{% endif %}>Performance</button>
+				<button type="submit" name="chart_view" value="drawdowns"{% if chart_view == 'drawdowns' %} aria-current="true"{% endif %}>Drawdowns</button>
+				<button type="submit" name="chart_view" value="exposure"{% if chart_view == 'exposure' %} aria-current="true"{% endif %}>Exposure</button>
+				<button type="submit" name="chart_view" value="trend"{% if chart_view == 'trend' %} aria-current="true"{% endif %}>Trend</button>
+				<button type="submit" name="chart_view" value="risk"{% if chart_view == 'risk' %} aria-current="true"{% endif %}>Risk</button>
 			</form>
 			<form class="chart-view-select" method="get" action="/#strategy-chart-heading">
 				<label for="chart-view">Chart</label>
 				<select id="chart-view" name="chart_view">
-					<option value="performance"{% if chart_view == 'performance' %} selected{% endif %}>Return vs SPY</option>
+					<option value="performance"{% if chart_view == 'performance' %} selected{% endif %}>Performance vs SPY</option>
 					<option value="drawdowns"{% if chart_view == 'drawdowns' %} selected{% endif %}>Drawdowns</option>
 					<option value="exposure"{% if chart_view == 'exposure' %} selected{% endif %}>Exposure</option>
-					<option value="trend"{% if chart_view == 'trend' %} selected{% endif %}>SPY / SMA200</option>
-					<option value="risk"{% if chart_view == 'risk' %} selected{% endif %}>RV20 / DD20</option>
+					<option value="trend"{% if chart_view == 'trend' %} selected{% endif %}>SPY / moving averages</option>
+					<option value="risk"{% if chart_view == 'risk' %} selected{% endif %}>Realized volatility</option>
 				</select>
 				<button type="submit">Show</button>
 			</form>
 		</nav>
+
 		<figure class="strategy-chart">
 			{% if chart_view == 'performance' %}
 			<div class="chart-band" role="group" aria-labelledby="performance-band-heading">
@@ -104,7 +104,7 @@
 					<h3 id="performance-band-heading">Growth of $100</h3>
 					{% if view.strategy_chart.performance_available %}
 					<ul class="chart-band-values" aria-label="Historical total returns">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5</span><strong>{{ view.strategy_chart.latest_strategy_value }} · {{ view.strategy_chart.strategy_total_return }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-strategy" aria-hidden="true"></i><span>Strategy</span><strong>{{ view.strategy_chart.latest_strategy_value }} · {{ view.strategy_chart.strategy_total_return }}</strong></li>
 						<li><i class="chart-swatch chart-swatch-spy" aria-hidden="true"></i><span>SPY</span><strong>{{ view.strategy_chart.latest_spy_value }} · {{ view.strategy_chart.spy_total_return }}</strong></li>
 					</ul>
 					{% endif %}
@@ -112,14 +112,14 @@
 				{% if view.strategy_chart.performance_available %}
 				<div class="chart-band-grid">
 					<div class="chart-y-axis" aria-hidden="true"><span>{{ view.strategy_chart.performance_high_label }}</span><span>{{ view.strategy_chart.performance_midpoint_label }}</span><span>{{ view.strategy_chart.performance_low_label }}</span></div>
-					<div class="chart-plot chart-plot-primary">
+					<div class="chart-plot">
 						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-performance-title strategy-performance-description">
-							<title id="strategy-performance-title">Historical ARL-5 rule replay compared with SPY</title>
-							<desc id="strategy-performance-description">Normalized growth of 100 dollars. The solid line is the leveraged ARL-5 SPY-return proxy and the dashed line is SPY price return.</desc>
+							<title id="strategy-performance-title">Historical strategy performance compared with SPY</title>
+							<desc id="strategy-performance-description">Normalized growth of 100 dollars. The solid line is the strategy replay and the dashed line is adjusted SPY.</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
-							<polyline class="chart-line chart-line-effective" points="{{ view.strategy_chart.performance_strategy_points }}" />
+							<polyline class="chart-line chart-line-strategy" points="{{ view.strategy_chart.performance_strategy_points }}" />
 							<polyline class="chart-line chart-line-secondary-halo" points="{{ view.strategy_chart.performance_spy_points }}" />
-							<polyline class="chart-line chart-line-spy-benchmark" points="{{ view.strategy_chart.performance_spy_points }}" />
+							<polyline class="chart-line chart-line-spy" points="{{ view.strategy_chart.performance_spy_points }}" />
 						</svg>
 					</div>
 				</div>
@@ -131,7 +131,7 @@
 					<h3 id="drawdown-band-heading">Close-to-close drawdown</h3>
 					{% if view.strategy_chart.performance_available %}
 					<ul class="chart-band-values" aria-label="Maximum historical drawdowns">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>ARL-5</span><strong>Max {{ view.strategy_chart.strategy_max_drawdown }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-strategy" aria-hidden="true"></i><span>Strategy</span><strong>Max {{ view.strategy_chart.strategy_max_drawdown }}</strong></li>
 						<li><i class="chart-swatch chart-swatch-spy" aria-hidden="true"></i><span>SPY</span><strong>Max {{ view.strategy_chart.spy_max_drawdown }}</strong></li>
 					</ul>
 					{% endif %}
@@ -139,14 +139,14 @@
 				{% if view.strategy_chart.performance_available %}
 				<div class="chart-band-grid">
 					<div class="chart-y-axis" aria-hidden="true"><span>{{ view.strategy_chart.drawdown_high_label }}</span><span>{{ view.strategy_chart.drawdown_midpoint_label }}</span><span>{{ view.strategy_chart.drawdown_low_label }}</span></div>
-					<div class="chart-plot chart-plot-primary">
+					<div class="chart-plot">
 						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-drawdown-title strategy-drawdown-description">
-							<title id="strategy-drawdown-title">Historical ARL-5 and SPY drawdowns</title>
-							<desc id="strategy-drawdown-description">Completed-close drawdown from each series' prior peak. The solid line is the ARL-5 proxy and the dashed line is SPY.</desc>
+							<title id="strategy-drawdown-title">Historical strategy and SPY drawdowns</title>
+							<desc id="strategy-drawdown-description">Close-to-close drawdown from each series' prior peak. The solid line is the strategy replay and the dashed line is adjusted SPY.</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
-							<polyline class="chart-line chart-line-effective" points="{{ view.strategy_chart.drawdown_strategy_points }}" />
+							<polyline class="chart-line chart-line-strategy" points="{{ view.strategy_chart.drawdown_strategy_points }}" />
 							<polyline class="chart-line chart-line-secondary-halo" points="{{ view.strategy_chart.drawdown_spy_points }}" />
-							<polyline class="chart-line chart-line-spy-benchmark" points="{{ view.strategy_chart.drawdown_spy_points }}" />
+							<polyline class="chart-line chart-line-spy" points="{{ view.strategy_chart.drawdown_spy_points }}" />
 						</svg>
 					</div>
 				</div>
@@ -155,49 +155,47 @@
 			{% elif chart_view == 'exposure' %}
 			<div class="chart-band" role="group" aria-labelledby="exposure-band-heading">
 				<div class="chart-band-heading">
-					<h3 id="exposure-band-heading">Regular-session exposure</h3>
+					<h3 id="exposure-band-heading">Target exposure</h3>
 					<ul class="chart-band-values" aria-label="Historical exposure summary">
-						<li><i class="chart-swatch chart-swatch-effective" aria-hidden="true"></i><span>Now</span><strong>{{ view.strategy_chart.latest_open_exposure }}</strong></li>
-						<li><span>Invested</span><strong>{{ view.strategy_chart.exposure_invested_percent }}</strong></li>
-						<li><span>At 0×</span><strong>{{ view.strategy_chart.exposure_zero_sessions }} sessions</strong></li>
+						<li><i class="chart-swatch chart-swatch-strategy" aria-hidden="true"></i><span>Latest</span><strong>{{ view.strategy_chart.latest_exposure }}</strong></li>
+						<li><span>Risk-on</span><strong>{{ view.strategy_chart.risk_on_percent }}</strong></li>
+						<li><span>Risk-off</span><strong>{{ view.strategy_chart.risk_off_sessions }} sessions</strong></li>
 					</ul>
 				</div>
-				{% if view.strategy_chart.exposure_open_path %}<div class="chart-band-grid">
-					<div class="chart-y-axis" aria-hidden="true"><span>4.85×</span><span>2.43×</span><span>0.00×</span></div>
-					<div class="chart-plot chart-plot-primary">
+				{% if view.strategy_chart.exposure_path %}
+				<div class="chart-band-grid">
+					<div class="chart-y-axis" aria-hidden="true"><span>{{ view.strategy_chart.exposure_high_label }}</span><span>{{ view.strategy_chart.exposure_midpoint_label }}</span><span>0.00×</span></div>
+					<div class="chart-plot">
 						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-exposure-title strategy-exposure-description">
-							<title id="strategy-exposure-title">Historical regular-session target exposure</title>
-							<desc id="strategy-exposure-description">A stepped line from zero to 4.85 times shows when the strategy rule replay was invested and when it held zero exposure.</desc>
+							<title id="strategy-exposure-title">Historical target exposure</title>
+							<desc id="strategy-exposure-description">A stepped line shows normal-volatility, high-volatility, and risk-off exposure across completed SPY sessions.</desc>
 							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
-							<path class="chart-line chart-line-effective" d="{{ view.strategy_chart.exposure_open_path }}" />
+							<path class="chart-line chart-line-strategy" d="{{ view.strategy_chart.exposure_path }}" />
 						</svg>
 					</div>
-				</div>{% else %}<p class="empty-state">{{ view.strategy_chart.exposure_empty_message or 'Historical exposure is unavailable until an effective target can be reconstructed.' }}</p>{% endif %}
+				</div>
+				{% else %}<p class="empty-state">Historical exposure is unavailable until the strategy has been replayed.</p>{% endif %}
 			</div>
 			{% elif chart_view == 'trend' %}
 			<div class="chart-band" role="group" aria-labelledby="trend-band-heading">
 				<div class="chart-band-heading">
-					<h3 id="trend-band-heading">SPY trend</h3>
-					<ul class="chart-band-values" aria-label="Latest SPY trend values">
-						<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY close · solid</span><strong>{{ view.strategy_chart.latest_close }}</strong></li>
-						<li><i class="chart-swatch chart-swatch-sma" aria-hidden="true"></i><span>SMA200 · dashed</span><strong>{{ view.strategy_chart.latest_sma200 }}</strong></li>
+					<h3 id="trend-band-heading">SPY regime trend</h3>
+					<ul class="chart-band-values" aria-label="Latest SPY and moving-average values">
+						<li><i class="chart-swatch chart-swatch-close" aria-hidden="true"></i><span>SPY close</span><strong>{{ view.strategy_chart.latest_close }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-fast" aria-hidden="true"></i><span>{{ view.strategy_chart.fast_sma_label }}</span><strong>{{ view.strategy_chart.latest_fast_sma }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-slow" aria-hidden="true"></i><span>{{ view.strategy_chart.slow_sma_label }}</span><strong>{{ view.strategy_chart.latest_slow_sma }}</strong></li>
 					</ul>
 				</div>
 				<div class="chart-band-grid">
-					<div class="chart-y-axis" aria-hidden="true">
-						<span>{{ view.strategy_chart.price_high_label }}</span>
-						<span>{{ view.strategy_chart.price_midpoint_label }}</span>
-						<span>{{ view.strategy_chart.price_low_label }}</span>
-					</div>
-					<div class="chart-plot chart-plot-trend">
+					<div class="chart-y-axis" aria-hidden="true"><span>{{ view.strategy_chart.price_high_label }}</span><span>{{ view.strategy_chart.price_midpoint_label }}</span><span>{{ view.strategy_chart.price_low_label }}</span></div>
+					<div class="chart-plot">
 						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-trend-title strategy-trend-description">
-							<title id="strategy-trend-title">SPY close and 200-session moving average</title>
-							<desc id="strategy-trend-description">SPY close is the solid line and SMA200 is the dashed line across {{ view.strategy_chart.session_count }} completed sessions. {{ view.strategy_chart.price_relationship }}</desc>
-							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" />
-							<line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" />
-							<line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
+							<title id="strategy-trend-title">SPY close with fast and slow moving averages</title>
+							<desc id="strategy-trend-description">The SPY close and both configured moving averages across {{ view.strategy_chart.session_count }} completed sessions. {{ view.strategy_chart.price_relationship }}</desc>
+							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
 							<polyline class="chart-line chart-line-close" points="{{ view.strategy_chart.price_close_points }}" />
-							<polyline class="chart-line chart-line-sma" points="{{ view.strategy_chart.price_sma200_points }}" />
+							<polyline class="chart-line chart-line-fast" points="{{ view.strategy_chart.price_fast_sma_points }}" />
+							<polyline class="chart-line chart-line-slow" points="{{ view.strategy_chart.price_slow_sma_points }}" />
 						</svg>
 					</div>
 				</div>
@@ -205,31 +203,21 @@
 			{% elif chart_view == 'risk' %}
 			<div class="chart-band" role="group" aria-labelledby="risk-band-heading">
 				<div class="chart-band-heading">
-					<h3 id="risk-band-heading">Volatility and drawdown</h3>
-					<ul class="chart-band-values" aria-label="Latest volatility and drawdown values">
-						<li><i class="chart-swatch chart-swatch-rv20" aria-hidden="true"></i><span>RV20 · solid</span><strong>{{ view.strategy_chart.latest_rv20 }}</strong></li>
-						<li><i class="chart-swatch chart-swatch-dd20" aria-hidden="true"></i><span>DD20 · dashed</span><strong>{{ view.strategy_chart.latest_dd20 }}</strong></li>
+					<h3 id="risk-band-heading">Realized volatility</h3>
+					<ul class="chart-band-values" aria-label="Latest realized volatility and threshold">
+						<li><i class="chart-swatch chart-swatch-rv" aria-hidden="true"></i><span>{{ view.strategy_chart.rv_label }}</span><strong>{{ view.strategy_chart.latest_rv }}</strong></li>
+						<li><i class="chart-swatch chart-swatch-threshold" aria-hidden="true"></i><span>Threshold</span><strong>{{ view.strategy_chart.rv_threshold_label }}</strong></li>
 					</ul>
 				</div>
 				<div class="chart-band-grid">
-					<div class="chart-y-axis" aria-hidden="true">
-						<span>{{ view.strategy_chart.risk_high_label }}</span>
-						<span>{{ view.strategy_chart.risk_midpoint_label }}</span>
-						<span>{{ view.strategy_chart.risk_low_label }}</span>
-					</div>
-					<div class="chart-plot chart-plot-risk">
+					<div class="chart-y-axis" aria-hidden="true"><span>{{ view.strategy_chart.risk_high_label }}</span><span>{{ view.strategy_chart.risk_midpoint_label }}</span><span>{{ view.strategy_chart.risk_low_label }}</span></div>
+					<div class="chart-plot">
 						<svg viewBox="0 0 1000 100" preserveAspectRatio="none" role="img" aria-labelledby="strategy-risk-title strategy-risk-description">
-							<title id="strategy-risk-title">RV20 volatility and DD20 drawdown</title>
-							<desc id="strategy-risk-description">RV20 is the solid line and DD20 is the dashed line. Reference lines show the 8 and 20 percent RV20 thresholds and the negative 1 percent DD20 bonus gate{% if view.strategy_chart.event_lock_reference_visible %}, plus the negative 4 percent qualified-event lock gate{% endif %}.</desc>
-							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" />
-							<line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" />
-							<line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
-							<line class="chart-reference chart-reference-rv20" x1="0" y1="{{ view.strategy_chart.rv20_floor_y }}" x2="1000" y2="{{ view.strategy_chart.rv20_floor_y }}" />
-							<line class="chart-reference chart-reference-rv20" x1="0" y1="{{ view.strategy_chart.rv20_zero_bonus_y }}" x2="1000" y2="{{ view.strategy_chart.rv20_zero_bonus_y }}" />
-							<line class="chart-reference chart-reference-dd20" x1="0" y1="{{ view.strategy_chart.dd20_bonus_gate_y }}" x2="1000" y2="{{ view.strategy_chart.dd20_bonus_gate_y }}" />
-							{% if view.strategy_chart.event_lock_reference_visible %}<line class="chart-reference chart-reference-event" x1="0" y1="{{ view.strategy_chart.event_lock_y }}" x2="1000" y2="{{ view.strategy_chart.event_lock_y }}" />{% endif %}
-							<polyline class="chart-line chart-line-rv20" points="{{ view.strategy_chart.risk_rv20_points }}" />
-							<polyline class="chart-line chart-line-dd20" points="{{ view.strategy_chart.risk_dd20_points }}" />
+							<title id="strategy-risk-title">SPY realized volatility</title>
+							<desc id="strategy-risk-description">The solid line is configured annualized realized volatility. The dashed reference line is the configured high-volatility threshold.</desc>
+							<line class="chart-grid" x1="0" y1="0" x2="1000" y2="0" /><line class="chart-grid" x1="0" y1="50" x2="1000" y2="50" /><line class="chart-grid" x1="0" y1="100" x2="1000" y2="100" />
+							<line class="chart-reference chart-reference-threshold" x1="0" y1="{{ view.strategy_chart.risk_threshold_y }}" x2="1000" y2="{{ view.strategy_chart.risk_threshold_y }}" />
+							<polyline class="chart-line chart-line-rv" points="{{ view.strategy_chart.risk_rv_points }}" />
 						</svg>
 					</div>
 				</div>
@@ -238,7 +226,7 @@
 
 			<div class="chart-shared-x-axis" aria-hidden="true"><span></span><div><span>{{ view.strategy_chart.start_date }}</span><span>{{ view.strategy_chart.end_date }}</span></div></div>
 			<figcaption>
-				{% if chart_view == 'performance' %}SPY-bar rule replay, rebased to $100. Fractional exposure; not MES performance.{% elif chart_view == 'drawdowns' %}Completed-close drawdowns for ARL-5 and SPY. Revised data can change history.{% elif chart_view == 'exposure' %}Target at each open. Locks start after the trigger close; recovery at a valid Tue/Fri open.{% elif chart_view == 'trend' %}{{ view.strategy_chart.price_relationship }} Completed sessions only.{% else %}RV20 / DD20 with 8%, 20%, and −1% thresholds; −4% only in a confirmed event window.{% endif %}
+				{% if chart_view == 'performance' %}Adjusted-SPY signal replay rebased to $100; fractional exposure, before futures execution costs.{% elif chart_view == 'drawdowns' %}Close-to-close drawdowns for the strategy replay and adjusted SPY.{% elif chart_view == 'exposure' %}Target exposure by session, including normal-volatility, high-volatility, and risk-off states.{% elif chart_view == 'trend' %}{{ view.strategy_chart.price_relationship }} Completed sessions only.{% else %}Annualized SPY realized volatility and the configured exposure threshold.{% endif %}
 			</figcaption>
 		</figure>
 		{% else %}
@@ -246,106 +234,89 @@
 		{% endif %}
 	</section>
 
-	<div class="content-grid">
-		<section class="panel" aria-labelledby="calculation-heading">
-			<div class="panel-heading">
-				<h2 id="calculation-heading">Calculation details</h2>
-				<span>Completed SPY sessions only</span>
-			</div>
-			<div class="table-scroll" tabindex="0" role="region" aria-label="Calculation details table">
-				<table>
-					<thead><tr><th scope="col">Input</th><th scope="col">Value</th></tr></thead>
-					<tbody>
-					{% for metric in view.calculation %}<tr><th scope="row">{{ metric.label }}</th><td>{{ metric.value }}</td></tr>{% endfor %}
-					</tbody>
-				</table>
-			</div>
-		</section>
-
-		<section class="panel event-panel" aria-labelledby="event-heading">
-			<div class="panel-heading">
-				<h2 id="event-heading">Systemic event</h2>
-				<span class="state-text state-{{ view.event.state|lower }}">{{ view.event.state|replace('_', ' ') }}</span>
-			</div>
-			<dl class="event-summary">
-				<div><dt>Type</dt><dd>{{ view.event.event_type }}</dd></div>
-				<div><dt>Window start</dt><dd>{{ view.event.window_start }}</dd></div>
-				<div><dt>Window end</dt><dd>{{ view.event.window_end }}</dd></div>
-				<div><dt>Event drawdown</dt><dd>{{ view.event.drawdown }}</dd></div>
-				<div><dt>Price gate</dt><dd>{{ view.event.price_gate }}</dd></div>
-				<div><dt>Recovery</dt><dd>{{ view.event.recovery }}</dd></div>
-				<div><dt>Detector</dt><dd>{{ view.event.detector }}</dd></div>
-				<div><dt>Verifier</dt><dd>{{ view.event.verifier }}</dd></div>
-			</dl>
-
-			<details {% if view.event.state == 'NEEDS_HUMAN_REVIEW' %}open{% endif %}>
-				<summary>Criterion-level evidence</summary>
-				{% if view.event.criteria %}
-				<ul class="evidence-list">
-					{% for item in view.event.criteria %}
-					<li><div><strong>{{ item.criterion }}</strong><span class="evidence-state state-{{ item.status|lower }}">{{ item.status }}</span></div><p>{{ item.excerpt }}</p></li>
-					{% endfor %}
-				</ul>
-				{% else %}<p class="empty-state">No event evidence has been stored.</p>{% endif %}
-				{% if view.event.missing_evidence %}<p><strong>Missing:</strong> {{ view.event.missing_evidence|join(', ') }}</p>{% endif %}
-				{% if view.event.contradictions %}<p><strong>Contradictions:</strong> {{ view.event.contradictions|join(', ') }}</p>{% endif %}
-			</details>
-
-			<details>
-				<summary>Source documents ({{ view.event.documents|length }})</summary>
-				{% if view.event.documents %}
-				<ul class="document-list">
-				{% for document in view.event.documents %}
-					<li>
-						{% if document.url %}<a href="{{ document.url }}" rel="noopener noreferrer" target="_blank">{{ document.title }}</a>{% else %}<strong>{{ document.title }}</strong>{% endif %}
-						<span>{{ document.publisher }} · {{ document.source_class }} · published {{ document.published_at }} · retrieved {{ document.retrieved_at }}</span>
-					</li>
-				{% endfor %}
-				</ul>
-				{% else %}<p class="empty-state">No source documents have been stored.</p>{% endif %}
-			</details>
-
-			<form class="event-check" action="/api/events/check" method="post">
-				<input type="hidden" name="csrf_token" value="{{ view.csrf_token }}" />
-				<button class="button button-secondary" type="submit">Check sources now</button>
-			</form>
-		</section>
-	</div>
-
-	<section class="panel" aria-labelledby="history-heading">
-		<div class="panel-heading"><h2 id="history-heading">Recent calculations</h2><span>Historical only</span></div>
-		{% if view.history %}
-		<div class="table-scroll" tabindex="0" role="region" aria-label="Recent calculation history table">
+	<section class="panel" aria-labelledby="calculation-heading">
+		<div class="panel-heading">
+			<h2 id="calculation-heading">Signal details</h2>
+			<span>Dividend-adjusted SPY closes</span>
+		</div>
+		<div class="table-scroll" tabindex="0" role="region" aria-label="Signal calculation details">
 			<table>
-				<thead><tr><th scope="col">Calculated</th><th scope="col">MES</th><th scope="col">Final target</th><th scope="col">Achieved</th><th scope="col">Status at calculation</th></tr></thead>
-				<tbody>{% for item in view.history %}<tr><th scope="row">{{ item.calculated_at }}</th><td>{{ item.quantity }}</td><td>{{ item.target }}</td><td>{{ item.achieved }}</td><td>{{ item.status }}</td></tr>{% endfor %}</tbody>
+				<thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+				<tbody>{% for metric in view.calculation %}<tr><th scope="row">{{ metric.label }}</th><td>{{ metric.value }}</td></tr>{% endfor %}</tbody>
 			</table>
 		</div>
-		{% else %}<p class="empty-state">No calculations have completed yet.</p>{% endif %}
+	</section>
+
+	<section class="panel" aria-labelledby="history-heading">
+		<div class="panel-heading"><h2 id="history-heading">Recent allocations</h2><span>Configuration-tagged history</span></div>
+		{% if view.history %}
+		<div class="table-scroll" tabindex="0" role="region" aria-label="Recent allocation history">
+			<table>
+				<thead><tr><th scope="col">Calculated</th><th scope="col">Allocation</th><th scope="col">Target exposure</th><th scope="col">Achieved exposure</th><th scope="col">Status</th></tr></thead>
+				<tbody>{% for item in view.history %}<tr><th scope="row">{{ item.calculated_at }}</th><td>{{ item.allocation }}</td><td>{{ item.target }}</td><td>{{ item.achieved }}</td><td>{{ item.status }}</td></tr>{% endfor %}</tbody>
+			</table>
+		</div>
+		{% else %}<p class="empty-state">No allocations have completed yet.</p>{% endif %}
 	</section>
 
 	<section class="panel settings-panel" aria-labelledby="settings-heading">
-		<div class="panel-heading"><h2 id="settings-heading">Settings</h2><span>Saved server-side</span></div>
-		<form action="/settings" method="post">
+		<div class="panel-heading"><h2 id="settings-heading">Settings</h2><span>Saving replays the full signal history</span></div>
+		<form class="settings-form" action="/settings" method="post">
 			<input type="hidden" name="csrf_token" value="{{ view.csrf_token }}" />
 			<fieldset>
-				<legend>Sizing</legend>
-				<label>Strategy amount (USD)<input name="strategy_amount_usd" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.strategy_amount }}" required /></label>
-				<label>Current MES quantity <span>(optional, display only)</span><input name="current_mes_quantity" type="number" step="1" inputmode="numeric" value="{{ view.settings.current_mes_quantity }}" /></label>
+				<legend>Capital and positions</legend>
+				<label>Strategy capital (USD)<input name="strategy_amount_usd" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.strategy_amount }}" required /></label>
+				<label>Current ES quantity <span>(optional)</span><input name="current_es_quantity" type="number" step="1" inputmode="numeric" value="{{ view.settings.current_es_quantity }}" /></label>
+				<label>Current MES quantity <span>(optional)</span><input name="current_mes_quantity" type="number" step="1" inputmode="numeric" value="{{ view.settings.current_mes_quantity }}" /></label>
 			</fieldset>
+
+			<fieldset>
+				<legend>Strategy</legend>
+				<div class="field-pair">
+					<label>Fast SMA sessions<input name="fast_sma_sessions" type="number" min="1" step="1" inputmode="numeric" value="{{ view.settings.fast_sma_sessions }}" required /></label>
+					<label>Slow SMA sessions<input name="slow_sma_sessions" type="number" min="2" step="1" inputmode="numeric" value="{{ view.settings.slow_sma_sessions }}" required /></label>
+				</div>
+				<div class="field-pair">
+					<label>Re-entry rebound (%)<input name="rebound_percent" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.rebound_percent }}" required /></label>
+					<label>RV window (sessions)<input name="rv_window_sessions" type="number" min="2" step="1" inputmode="numeric" value="{{ view.settings.rv_window_sessions }}" required /></label>
+				</div>
+				<div class="field-pair">
+					<label>Annualization sessions<input name="annualization_sessions" type="number" min="1" step="1" inputmode="numeric" value="{{ view.settings.annualization_sessions }}" required /></label>
+					<label>RV threshold (%)<input name="rv_threshold_percent" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.rv_threshold_percent }}" required /></label>
+				</div>
+				<div class="field-pair">
+					<label>Normal-vol exposure (×)<input name="normal_exposure" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.normal_exposure }}" required /></label>
+					<label>High-vol exposure (×)<input name="high_vol_exposure" type="number" min="0.01" step="0.01" inputmode="decimal" value="{{ view.settings.high_vol_exposure }}" required /></label>
+				</div>
+				<fieldset class="weekday-fieldset">
+					<legend>Exposure review days</legend>
+					<div class="weekday-options">
+						<label><input name="review_weekdays" type="checkbox" value="0"{% if 0 in view.settings.review_weekdays %} checked{% endif %} />Mon</label>
+						<label><input name="review_weekdays" type="checkbox" value="1"{% if 1 in view.settings.review_weekdays %} checked{% endif %} />Tue</label>
+						<label><input name="review_weekdays" type="checkbox" value="2"{% if 2 in view.settings.review_weekdays %} checked{% endif %} />Wed</label>
+						<label><input name="review_weekdays" type="checkbox" value="3"{% if 3 in view.settings.review_weekdays %} checked{% endif %} />Thu</label>
+						<label><input name="review_weekdays" type="checkbox" value="4"{% if 4 in view.settings.review_weekdays %} checked{% endif %} />Fri</label>
+					</div>
+				</fieldset>
+				<p class="field-help">The fast SMA must remain below the slow SMA length. High-vol exposure must remain below normal-vol exposure.</p>
+			</fieldset>
+
 			<fieldset>
 				<legend>Interactive Brokers</legend>
 				<label>TWS / Gateway host<input name="ibkr_host" type="text" maxlength="253" value="{{ view.settings.ibkr_host }}" autocomplete="off" required /></label>
 				<label>Port<input name="ibkr_port" type="number" min="1" max="65535" step="1" value="{{ view.settings.ibkr_port }}" required /></label>
 				<label>Client ID<input name="ibkr_client_id" type="number" min="0" step="1" value="{{ view.settings.ibkr_client_id }}" required /></label>
 			</fieldset>
-			<fieldset>
-				<legend>Event verification</legend>
-				<label>OpenAI API key <span>{% if view.settings.openai_key_configured %}Saved — leave blank to keep it{% else %}Not configured{% endif %}</span><input name="openai_api_key" type="password" autocomplete="new-password" /></label>
-				<label>Detector model<input name="detector_model" type="text" maxlength="100" value="{{ view.settings.detector_model }}" required /></label>
-				<label>Verifier model<input name="verifier_model" type="text" maxlength="100" value="{{ view.settings.verifier_model }}" required /></label>
-			</fieldset>
-			<button class="button button-primary" type="submit">Save settings</button>
+
+			<div class="settings-actions">
+				<button class="button button-primary" type="submit">Save settings</button>
+			</div>
+		</form>
+
+		<form class="settings-reset" action="/settings/reset-strategy" method="post">
+			<input type="hidden" name="csrf_token" value="{{ view.csrf_token }}" />
+			<div><strong>Strategy defaults</strong><span>Reset signal and exposure parameters only. Capital, positions, and IBKR settings stay unchanged.</span></div>
+			<button class="button button-secondary" type="submit">Reset strategy defaults</button>
 		</form>
 	</section>
 

@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="ARL-5">
-  <style>
-    svg { fill: #000000; }
-    @media (prefers-color-scheme: dark) { svg { fill: #ffffff; } }
-  </style>
-  <path fill-rule="evenodd" d="M3 3h42v42H3V3Zm4 4v34h34V7H7Z" />
-  <path d="M15 11h22l-2.2 6H20.1l-1 4.5h9.8c6.1 0 9.6 3.1 9.6 8.1 0 5.3-4.1 8.4-10.5 8.4H10l2.2-6h15.9c2.8 0 4.3-.8 4.3-2.4 0-1.5-1.4-2.2-4.1-2.2H11.2L15 11Z" />
-</svg>

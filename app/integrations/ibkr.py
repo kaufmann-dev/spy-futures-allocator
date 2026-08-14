@@ -4,6 +4,7 @@ import calendar
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -21,6 +22,15 @@ class IbkrUnavailable(RuntimeError):
 
 
 NEW_YORK = ZoneInfo("America/New_York")
+FUTURES_SYMBOLS = ("ES", "MES")
+_EXPECTED_MULTIPLIERS = {
+    "ES": Decimal("50"),
+    "MES": Decimal("5"),
+}
+_QUOTE_REQUEST_IDS = {
+    "ES": 40_001,
+    "MES": 40_002,
+}
 
 
 @dataclass(frozen=True)
@@ -37,7 +47,7 @@ class ResolvedContract:
 
 
 @dataclass(frozen=True)
-class SpyDailyBar:
+class AdjustedSpyDailyBar:
     session_date: date
     open: Decimal
     high: Decimal
@@ -47,7 +57,7 @@ class SpyDailyBar:
 
 
 @dataclass(frozen=True)
-class MesQuote:
+class FuturesQuote:
     contract: ResolvedContract
     bid: Decimal | None
     ask: Decimal | None
@@ -84,8 +94,17 @@ class _ContractRequest:
 @dataclass
 class _HistoricalRequest:
     event: threading.Event = field(default_factory=threading.Event)
-    bars: list[SpyDailyBar] = field(default_factory=list)
+    bars: list[AdjustedSpyDailyBar] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass
+class _QuoteState:
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    last: Decimal | None = None
+    timestamp: datetime | None = None
+    market_data_type: int | None = None
 
 
 def _third_friday(year: int, month: int) -> date:
@@ -94,8 +113,8 @@ def _third_friday(year: int, month: int) -> date:
     return date(year, month, fridays[2])
 
 
-def active_mes_expiry(on_date: date) -> str:
-    """Return YYYYMM for the display contract, rolling eight calendar days before expiry."""
+def active_futures_expiry(on_date: date) -> str:
+    """Return YYYYMM for ES and MES, rolling eight calendar days before expiry."""
 
     quarter_months = (3, 6, 9, 12)
     candidates = [(on_date.year, month) for month in quarter_months]
@@ -104,7 +123,7 @@ def active_mes_expiry(on_date: date) -> str:
         expiry = _third_friday(year, month)
         if on_date < expiry - timedelta(days=8):
             return f"{year:04d}{month:02d}"
-    raise AssertionError("quarterly MES expiry calculation failed")
+    raise AssertionError("quarterly futures expiry calculation failed")
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -115,9 +134,40 @@ def _decimal(value: Any) -> Decimal | None:
     return converted if converted.is_finite() else None
 
 
-class _IbkrClient(EWrapper, EClient):  # type: ignore[misc]
-    QUOTE_REQUEST_ID = 40_001
+def _expiry_month(contract: ResolvedContract) -> str:
+    expiry_month = contract.expiry[:6]
+    if len(expiry_month) != 6 or not expiry_month.isdigit():
+        raise IbkrUnavailable(f"IBKR returned an invalid {contract.symbol} expiry")
+    return expiry_month
 
+
+def _validate_futures_contracts(
+    contracts: Mapping[str, ResolvedContract],
+) -> dict[str, ResolvedContract]:
+    if set(contracts) != set(FUTURES_SYMBOLS):
+        raise IbkrUnavailable("both ES and MES contracts are required")
+
+    validated: dict[str, ResolvedContract] = {}
+    for symbol in FUTURES_SYMBOLS:
+        contract = contracts[symbol]
+        if (
+            contract.symbol != symbol
+            or contract.security_type != "FUT"
+            or contract.multiplier != _EXPECTED_MULTIPLIERS[symbol]
+        ):
+            raise IbkrUnavailable(
+                f"resolved {symbol} identity or multiplier is not the expected official contract"
+            )
+        validated[symbol] = contract
+
+    expiry_values = {contract.expiry for contract in validated.values()}
+    expiry_months = {_expiry_month(contract) for contract in validated.values()}
+    if len(expiry_values) != 1 or len(expiry_months) != 1:
+        raise IbkrUnavailable("resolved ES and MES contracts do not have the same expiry")
+    return validated
+
+
+class _IbkrClient(EWrapper, EClient):  # type: ignore[misc]
     def __init__(self) -> None:
         EWrapper.__init__(self)
         EClient.__init__(self, self)
@@ -126,17 +176,35 @@ class _IbkrClient(EWrapper, EClient):  # type: ignore[misc]
         self._request_id = 1_000
         self._contract_requests: dict[int, _ContractRequest] = {}
         self._historical_requests: dict[int, _HistoricalRequest] = {}
-        self.market_data_type: int | None = None
-        self.bid: Decimal | None = None
-        self.ask: Decimal | None = None
-        self.last: Decimal | None = None
-        self.quote_timestamp: datetime | None = None
+        self._quote_states = {
+            request_id: _QuoteState() for request_id in _QUOTE_REQUEST_IDS.values()
+        }
         self.last_error: str | None = None
 
     def next_id(self) -> int:
         with self._lock:
             self._request_id += 1
             return self._request_id
+
+    def reset_quote(self, request_id: int) -> None:
+        with self._lock:
+            if request_id not in self._quote_states:
+                raise ValueError(f"unknown futures quote request ID: {request_id}")
+            self._quote_states[request_id] = _QuoteState()
+
+    def quote_state(self, request_id: int) -> _QuoteState:
+        with self._lock:
+            try:
+                state = self._quote_states[request_id]
+            except KeyError as exc:
+                raise ValueError(f"unknown futures quote request ID: {request_id}") from exc
+            return _QuoteState(
+                bid=state.bid,
+                ask=state.ask,
+                last=state.last,
+                timestamp=state.timestamp,
+                market_data_type=state.market_data_type,
+            )
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802, ARG002
         self.ready.set()
@@ -191,8 +259,8 @@ class _IbkrClient(EWrapper, EClient):  # type: ignore[misc]
                 return
             if low > min(open_, high, close):
                 return
-            parsed = SpyDailyBar(session_date, open_, high, low, close, volume)
-        except (ValueError, TypeError):
+            parsed = AdjustedSpyDailyBar(session_date, open_, high, low, close, volume)
+        except (AttributeError, ValueError, TypeError):
             return
         with self._lock:
             if request := self._historical_requests.get(reqId):
@@ -204,33 +272,38 @@ class _IbkrClient(EWrapper, EClient):  # type: ignore[misc]
                 request.event.set()
 
     def marketDataType(self, reqId: int, marketDataType: int) -> None:  # noqa: N802
-        if reqId == self.QUOTE_REQUEST_ID:
-            with self._lock:
-                self.market_data_type = marketDataType
+        with self._lock:
+            if state := self._quote_states.get(reqId):
+                state.market_data_type = marketDataType
 
     def tickPrice(self, reqId: int, tickType: int, price: float, attrib: TickAttrib) -> None:  # noqa: N802, ARG002
-        if reqId != self.QUOTE_REQUEST_ID or not math.isfinite(price) or price <= 0:
+        if not math.isfinite(price) or price <= 0:
             return
         value = Decimal(str(price))
         with self._lock:
+            state = self._quote_states.get(reqId)
+            if state is None:
+                return
             if tickType in {1, 66}:
-                self.bid = value
+                state.bid = value
             elif tickType in {2, 67}:
-                self.ask = value
+                state.ask = value
             elif tickType in {4, 68}:
-                self.last = value
+                state.last = value
             else:
                 return
-            self.quote_timestamp = datetime.now(UTC)
+            state.timestamp = datetime.now(UTC)
 
     def tickString(self, reqId: int, tickType: int, value: str) -> None:  # noqa: N802
-        if reqId == self.QUOTE_REQUEST_ID and tickType == 45:
-            try:
-                timestamp = datetime.fromtimestamp(int(value), tz=UTC)
-            except (ValueError, OSError):
-                return
-            with self._lock:
-                self.quote_timestamp = timestamp
+        if tickType != 45:
+            return
+        try:
+            timestamp = datetime.fromtimestamp(int(value), tz=UTC)
+        except (ValueError, OSError):
+            return
+        with self._lock:
+            if state := self._quote_states.get(reqId):
+                state.timestamp = timestamp
 
 
 class IbkrMarketData:
@@ -242,7 +315,8 @@ class IbkrMarketData:
         self.client_id = client_id
         self._client = _IbkrClient()
         self._thread: threading.Thread | None = None
-        self._mes_contract: ResolvedContract | None = None
+        self._futures_contracts: dict[str, ResolvedContract] = {}
+        self._subscribed_request_ids: set[int] = set()
 
     @property
     def connected(self) -> bool:
@@ -258,6 +332,7 @@ class IbkrMarketData:
         if self._client.isConnected():
             self._client.disconnect()
         self._client = _IbkrClient()
+        self._subscribed_request_ids.clear()
         self._client.connect(self.host, self.port, self.client_id)
         if not self._client.isConnected():
             raise IbkrUnavailable("IBKR socket connection was rejected")
@@ -269,10 +344,12 @@ class IbkrMarketData:
 
     def disconnect(self) -> None:
         if self._client.isConnected():
-            self._client.cancelMktData(_IbkrClient.QUOTE_REQUEST_ID)
+            for request_id in _QUOTE_REQUEST_IDS.values():
+                self._client.cancelMktData(request_id)
             self._client.disconnect()
         self._client.ready.clear()
-        self._mes_contract = None
+        self._futures_contracts.clear()
+        self._subscribed_request_ids.clear()
 
     def _require_connection(self) -> None:
         if not self.connected:
@@ -282,7 +359,8 @@ class IbkrMarketData:
         self._require_connection()
         request_id = self._client.next_id()
         request = _ContractRequest()
-        self._client._contract_requests[request_id] = request
+        with self._client._lock:
+            self._client._contract_requests[request_id] = request
         try:
             self._client.reqContractDetails(request_id, contract)
             if not request.event.wait(timeout):
@@ -310,7 +388,8 @@ class IbkrMarketData:
                 multiplier=multiplier,
             )
         finally:
-            self._client._contract_requests.pop(request_id, None)
+            with self._client._lock:
+                self._client._contract_requests.pop(request_id, None)
 
     def resolve_spy(self) -> ResolvedContract:
         contract = Contract()
@@ -321,61 +400,84 @@ class IbkrMarketData:
         contract.currency = "USD"
         return self.resolve_contract(contract)
 
-    def resolve_active_mes(self, on_date: date | None = None) -> ResolvedContract:
-        contract = Contract()
-        contract.symbol = "MES"
-        contract.secType = "FUT"
-        contract.exchange = "CME"
-        contract.currency = "USD"
-        contract.lastTradeDateOrContractMonth = active_mes_expiry(
-            on_date or datetime.now(NEW_YORK).date()
+    def resolve_active_futures(
+        self, on_date: date | None = None
+    ) -> dict[str, ResolvedContract]:
+        expiry = active_futures_expiry(on_date or datetime.now(NEW_YORK).date())
+        resolved: dict[str, ResolvedContract] = {}
+        for symbol in FUTURES_SYMBOLS:
+            contract = Contract()
+            contract.symbol = symbol
+            contract.secType = "FUT"
+            contract.exchange = "CME"
+            contract.currency = "USD"
+            contract.lastTradeDateOrContractMonth = expiry
+            resolved[symbol] = self.resolve_contract(contract)
+
+        validated = _validate_futures_contracts(resolved)
+        if {_expiry_month(contract) for contract in validated.values()} != {expiry}:
+            raise IbkrUnavailable("IBKR resolved futures contracts outside the requested expiry")
+        self._futures_contracts = validated
+        return dict(validated)
+
+    def subscribe_futures(
+        self, contracts: Mapping[str, ResolvedContract] | None = None
+    ) -> None:
+        self._require_connection()
+        selected = _validate_futures_contracts(
+            self._futures_contracts if contracts is None else contracts
         )
-        resolved = self.resolve_contract(contract)
-        if resolved.symbol != "MES" or resolved.multiplier != Decimal("5"):
-            raise IbkrUnavailable(
-                "resolved MES identity or multiplier is not the expected official contract"
-            )
-        self._mes_contract = resolved
-        return resolved
-
-    def subscribe_mes(self, contract: ResolvedContract | None = None) -> None:
-        self._require_connection()
-        selected = contract or self._mes_contract
-        if selected is None:
-            raise IbkrUnavailable("MES contract is unresolved")
-        ib_contract = Contract()
-        ib_contract.conId = selected.con_id
-        ib_contract.symbol = selected.symbol
-        ib_contract.secType = selected.security_type
-        ib_contract.exchange = selected.exchange
-        ib_contract.currency = selected.currency
-        ib_contract.localSymbol = selected.local_symbol
-        ib_contract.tradingClass = selected.trading_class
-        ib_contract.lastTradeDateOrContractMonth = selected.expiry
-        ib_contract.multiplier = str(selected.multiplier)
+        self._futures_contracts = selected
+        for symbol in FUTURES_SYMBOLS:
+            request_id = _QUOTE_REQUEST_IDS[symbol]
+            if request_id in self._subscribed_request_ids:
+                self._client.cancelMktData(request_id)
+            self._client.reset_quote(request_id)
         self._client.reqMarketDataType(1)
-        self._client.reqMktData(_IbkrClient.QUOTE_REQUEST_ID, ib_contract, "", False, False, [])
+        for symbol in FUTURES_SYMBOLS:
+            request_id = _QUOTE_REQUEST_IDS[symbol]
+            contract = selected[symbol]
+            ib_contract = Contract()
+            ib_contract.conId = contract.con_id
+            ib_contract.symbol = contract.symbol
+            ib_contract.secType = contract.security_type
+            ib_contract.exchange = contract.exchange
+            ib_contract.currency = contract.currency
+            ib_contract.localSymbol = contract.local_symbol
+            ib_contract.tradingClass = contract.trading_class
+            ib_contract.lastTradeDateOrContractMonth = contract.expiry
+            ib_contract.multiplier = str(contract.multiplier)
+            self._client.reqMktData(request_id, ib_contract, "", False, False, [])
+            self._subscribed_request_ids.add(request_id)
 
-    def current_mes_quote(self) -> MesQuote:
+    def current_futures_quote(self, symbol: str) -> FuturesQuote:
         self._require_connection()
-        if self._mes_contract is None:
-            raise IbkrUnavailable("MES contract is unresolved")
-        with self._client._lock:
-            timestamp = self._client.quote_timestamp
-            if timestamp is None:
-                raise IbkrUnavailable("MES quote is unavailable")
-            return MesQuote(
-                contract=self._mes_contract,
-                bid=self._client.bid,
-                ask=self._client.ask,
-                last=self._client.last,
-                timestamp=timestamp,
-                market_data_type=self._client.market_data_type,
-            )
+        normalized_symbol = symbol.upper()
+        try:
+            contract = self._futures_contracts[normalized_symbol]
+            request_id = _QUOTE_REQUEST_IDS[normalized_symbol]
+        except KeyError as exc:
+            if normalized_symbol not in FUTURES_SYMBOLS:
+                raise ValueError(f"unsupported futures symbol: {symbol}") from exc
+            raise IbkrUnavailable(f"{normalized_symbol} contract is unresolved") from exc
+        state = self._client.quote_state(request_id)
+        if state.timestamp is None:
+            raise IbkrUnavailable(f"{normalized_symbol} quote is unavailable")
+        return FuturesQuote(
+            contract=contract,
+            bid=state.bid,
+            ask=state.ask,
+            last=state.last,
+            timestamp=state.timestamp,
+            market_data_type=state.market_data_type,
+        )
 
-    def fetch_spy_daily_bars(
-        self, *, duration: str = "2 Y", timeout: float = 45.0
-    ) -> list[SpyDailyBar]:
+    def current_futures_quotes(self) -> dict[str, FuturesQuote]:
+        return {symbol: self.current_futures_quote(symbol) for symbol in FUTURES_SYMBOLS}
+
+    def fetch_adjusted_spy_daily_bars(
+        self, *, timeout: float = 45.0
+    ) -> list[AdjustedSpyDailyBar]:
         self._require_connection()
         spy = self.resolve_spy()
         contract = Contract()
@@ -386,15 +488,16 @@ class IbkrMarketData:
         contract.currency = spy.currency
         request_id = self._client.next_id()
         request = _HistoricalRequest()
-        self._client._historical_requests[request_id] = request
+        with self._client._lock:
+            self._client._historical_requests[request_id] = request
         try:
             self._client.reqHistoricalData(
                 request_id,
                 contract,
                 "",
-                duration,
+                "40 Y",
                 "1 day",
-                "TRADES",
+                "ADJUSTED_LAST",
                 1,
                 2,
                 False,
@@ -408,19 +511,25 @@ class IbkrMarketData:
             deduped = {bar.session_date: bar for bar in request.bars}
             return [deduped[key] for key in sorted(deduped)]
         finally:
-            self._client._historical_requests.pop(request_id, None)
+            with self._client._lock:
+                self._client._historical_requests.pop(request_id, None)
 
-    def wait_for_live_quote(self, timeout: float = 15.0) -> MesQuote:
+    def wait_for_live_quotes(self, timeout: float = 15.0) -> dict[str, FuturesQuote]:
         deadline = time.monotonic() + timeout
-        last_problem = "MES quote is unavailable"
+        last_problem = "ES and MES quotes are unavailable"
         while time.monotonic() < deadline:
             try:
-                quote = self.current_mes_quote()
+                quotes = self.current_futures_quotes()
             except IbkrUnavailable as exc:
                 last_problem = str(exc)
             else:
-                if quote.is_live and quote.mark is not None:
-                    return quote
-                last_problem = "MES market data is not live"
+                unavailable = [
+                    symbol
+                    for symbol, quote in quotes.items()
+                    if not quote.is_live or quote.mark is None
+                ]
+                if not unavailable:
+                    return quotes
+                last_problem = f"{', '.join(unavailable)} market data is not live"
             time.sleep(0.1)
         raise IbkrUnavailable(last_problem)

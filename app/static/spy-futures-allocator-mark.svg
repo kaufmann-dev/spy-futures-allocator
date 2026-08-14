@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="SPY Futures Allocator">
+  <style>
+    svg { fill: #000000; }
+    @media (prefers-color-scheme: dark) { svg { fill: #ffffff; } }
+  </style>
+  <path fill-rule="evenodd" d="M3 3h42v42H3V3Zm4 4v34h34V7H7Z" />
+  <path d="M12 33h7v-6h7v-6h10v6h-6v6h6v5H12v-5Zm0-23h24v6H19v5h-7V10Z" />
+</svg>

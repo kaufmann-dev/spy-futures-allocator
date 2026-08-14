@@ -10,12 +10,12 @@ class CalculationUnavailable(DomainError):
 
 
 class SizingUnavailable(DomainError):
-    """MES sizing cannot be completed safely."""
+    """ES/MES sizing cannot be completed safely."""
 
 
 class ScheduleUnavailable(DomainError):
     """The current scheduled target cannot be reconstructed safely."""
 
 
-class EventStateInconsistent(DomainError):
-    """The event overlay contains contradictory or incomplete state."""
+class PerformanceUnavailable(DomainError):
+    """Historical proxy performance cannot be reconstructed safely."""
